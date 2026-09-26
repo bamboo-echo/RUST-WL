@@ -256,57 +256,7 @@ fn rope_sticks_on_slope_up_to_coulomb_threshold() {
     );
 }
 
-/// 临时探针（定判据用，定完删）：直接查"球 vs 盒"的穿透 + 吊床里的反作用计数。
-#[test]
-fn probe_body_query() {
-    use vxl_phys_soft::rigid::shape_penetration;
-    let shape = Shape::Box {
-        half: Vec3::splat(0.05),
-    };
-    for (by, py) in [(0.60f32, 0.55f32), (0.55, 0.55), (0.52, 0.55), (0.50, 0.55)] {
-        let r = shape_penetration(
-            &shape,
-            Vec3::new(0.0, by, 0.0),
-            Quat::IDENTITY,
-            Vec3::new(0.0, py, 0.0),
-            0.02,
-        );
-        println!("盒心 y={by:.2} 粒子 y={py:.2} -> {r:?}");
-    }
-    // 吊床里前 6 步的反作用
-    let mut r = Rope::span(
-        Vec3::new(-0.5, 1.0, 0.0),
-        Vec3::new(0.5, 1.0, 0.0),
-        33,
-        1.4,
-        0.02,
-    );
-    r.damping = 0.999;
-    let (mut y, m) = (0.62f32, 1.0f32);
-    let mut v = 0.0f32;
-    for t in 0..40 {
-        let proxy = RigidProxy {
-            body: 0,
-            shape,
-            pos: Vec3::new(0.0, y, 0.0),
-            rot: Quat::IDENTITY,
-            linvel: Vec3::new(0.0, v, 0.0),
-            inv_mass: 1.0 / m,
-        };
-        r.step(DT, GRAVITY, &NoProviders, 0, std::slice::from_ref(&proxy));
-        v += GRAVITY.y * DT;
-        y += v * DT;
-        let imp: f32 = r.reactions.iter().map(|e| e.impulse.y).sum();
-        if t % 8 == 0 || !r.reactions.is_empty() {
-            println!(
-                "t={t:2} 盒 y={y:.4} v={v:.3} 反作用条数={} Σimp.y={imp:+.4}",
-                r.reactions.len()
-            );
-        }
-        v += imp / m;
-    }
-}
-
+/// **粒子 ↔ 刚体耦合（Akinci 式最小实现）**：① 绳落在**静态盒**上就位；② 绳把**动态盒吊住**
 /// —— 后者是双向耦合的**杀手判据**（A/B：把代理表换成空 ⇒ 盒子直接掉下去）。
 ///
 /// 测试自己扮演"门面"的角色：盒子的积分自己推（半隐式，与引擎积分器同款），并把绳的反作用
