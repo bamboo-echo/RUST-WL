@@ -40,6 +40,13 @@ pub struct Rope {
     pub substeps: u32,
     /// 接触皮肤带（预判接触宽度，`m`）。
     pub skin: f32,
+    /// **接触摩擦系数 μ**（库仑，位置口径）：每个接触把本子步的**切向滑移**限制到
+    /// `μ·法向修正量`。`0` = 无摩擦（纯法向投影）。
+    ///
+    /// 为什么用"位移"而不是"力"：XPBD 的位置级接触里没有显式冲量，**法向修正量就是法向
+    /// 冲量的位置代理**——静止在斜面上时它 ≈ `|g_n|·h²`（重力在法向的分量），而切向位移
+    /// ≈ `|g_t|·h²` ⇒ 这条判据恰好退化成解析的静摩擦阈值 **`tanθ ≤ μ`**（判据里有双向实测）。
+    pub friction: f32,
     /// 速度阻尼（每子步乘一次）：`1.0` = 无阻尼。**不是** XPBD 的组成部分，只为把"悬垂形状"
     /// 做成**稳态读数**（否则绳永远在摆，读数只能取窗口均值，见测量协议 §5）。
     pub damping: f32,
@@ -76,6 +83,7 @@ impl Rope {
             radius,
             substeps: 8,
             skin: 0.01,
+            friction: 0.5,
             damping: 1.0,
             buf: Vec::new(),
         }
@@ -171,7 +179,8 @@ impl Rope {
         }
     }
 
-    /// 逐粒子把穿透推到面上（多接触按 Gauss-Seidel 顺序逐个推；带内预判不推）。
+    /// 逐粒子把穿透推到面上（多接触按 Gauss-Seidel 顺序逐个推；带内预判不推），
+    /// 并按**库仑锥**限制切向滑移（位置口径，见 [`Rope::friction`]）。
     fn project_contacts(&mut self, providers: &dyn ProviderColliders, provider_count: u32) {
         // `buf` 借出去才能再借 `self.pos`（同窄相 `prims.rs` 的 `mem::take` 手法）。
         let mut buf = std::mem::take(&mut self.buf);
@@ -185,8 +194,27 @@ impl Rope {
                     continue;
                 }
                 for c in &buf {
-                    if c.depth > 0.0 {
-                        self.pos[i] += c.normal * c.depth;
+                    if c.depth <= 0.0 {
+                        continue; // 带内预判不推（无恢复系数的位置口径）
+                    }
+                    let n = c.normal;
+                    // ① 法向：推到面上（位移 = 穿透量）。
+                    self.pos[i] += n * c.depth;
+                    // ② 切向：库仑锥 —— 摩擦能"吃掉"的切向位移上限 = `μ·法向修正量`。
+                    //    （力的等效：切向位移 `d` 对应 `F = m·d/h²`，锥内 `F ≤ μN` ⇔ `d ≤ μ·法向位移`。）
+                    //    **锥内整段吃掉 ⇒ 完全黏住（静摩擦）**；超出 ⇒ 吃掉 `μ·法向`、余下按动摩擦滑掉。
+                    //    ⚠️ 只扣"超出部分"是错的（首版就这么写）：锥内不修正 ⇒ 每子步照落一格
+                    //    `g_t·h²` ⇒ **恒定蠕变**（实测率精确 ∝ h：子步 1/2/4/8/16 ⇒ 1.271/0.636/0.318/
+                    //    0.159/0.079 m/千步），且**两粒子（无链张力）情形同速率** ⇒ 模型本身的问题，不是张力。
+                    if self.friction > 0.0 {
+                        let dp = self.pos[i] - self.prev[i];
+                        let t = dp - n * dp.dot(n);
+                        let slip = t.length();
+                        if slip > 0.0 {
+                            let budget = self.friction * c.depth;
+                            let removed = if slip < budget { slip } else { budget };
+                            self.pos[i] -= t * (removed / slip);
+                        }
                     }
                 }
             }

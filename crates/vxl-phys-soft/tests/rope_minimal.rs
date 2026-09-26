@@ -168,6 +168,94 @@ fn rope_sags_to_catenary_stays_inextensible_and_deterministic() {
     );
 }
 
+/// 斜面网格：`y = x·tanθ` 的**真平面**（所有三角形共法线；θ 由 `tanθ` 给）。
+fn ramp_mesh(tan_theta: f32) -> TriMesh {
+    const N: usize = 8;
+    const S: f32 = 4.0;
+    let mut verts: Vec<Vec3> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for iz in 0..=N {
+        for ix in 0..=N {
+            let x = -S + (2.0 * S * ix as f32) / N as f32;
+            let z = -S + (2.0 * S * iz as f32) / N as f32;
+            verts.push(Vec3::new(x, x * tan_theta, z));
+        }
+    }
+    for iz in 0..N as u32 {
+        for ix in 0..N as u32 {
+            let a = iz * (N as u32 + 1) + ix;
+            let c = a + 1;
+            let d = a + N as u32 + 1;
+            let e = d + 1;
+            tris.push([a, d, c]);
+            tris.push([c, d, e]);
+        }
+    }
+    TriMesh::new(verts, tris)
+}
+
+/// 绳的质心 x。
+fn centroid_x(r: &Rope) -> f32 {
+    r.pos.iter().map(|p| p.x).sum::<f32>() / r.pos.len() as f32
+}
+
+/// 在斜面上放一条绳，返回**后半程的沿坡位移**（避开落地瞬态；负 = 往坡下走）。
+fn slide_of(tan_theta: f32, friction: f32, steps: usize) -> f32 {
+    const NODES: usize = 33;
+    const RADIUS: f32 = 0.02;
+    let mesh = ramp_mesh(tan_theta);
+    let mut r = Rope::line(
+        Vec3::new(-0.3, 1.0, 0.0),
+        Vec3::new(0.3, 1.0, 0.0),
+        NODES,
+        RADIUS,
+    );
+    r.set_pinned(0, false);
+    r.set_pinned(NODES - 1, false);
+    r.friction = friction;
+    r.damping = 0.999;
+    let mut mid = 0.0f32;
+    for t in 0..steps {
+        r.step(DT, GRAVITY, &mesh, 1);
+        if t == steps / 2 {
+            mid = centroid_x(&r);
+        }
+    }
+    centroid_x(&r) - mid
+}
+
+/// **斜面静摩擦：阈值应当是解析的 `tanθ_crit = μ`**（库仑）。
+///
+/// 双向对照（同一场景只改自变量）：μ = 0.5 ⇒ 临界角 `atan(0.5) = 26.57°` ⇒ 15° 该**停住**、
+/// 35° 该**滑下去**；再把 15° 的 μ 换成 0 ⇒ **也该滑**（证明"停住"来自摩擦，不是别的东西）。
+///
+/// **这条判据抓到过一个真 bug**（首版模型）：切向修正只扣"超出锥的部分"⇒ 锥内不修正 ⇒ 每子步
+/// 照落一格 `g_t·h²` ⇒ **恒定蠕变**（实测率精确 ∝ h：子步 1/2/4/8/16 ⇒ 1.271/0.636/0.318/0.159/
+/// 0.079 m/千步；两粒子无张力情形同速率 ⇒ 是模型本身而非链张力）。正解：**锥内整段吃掉（黏住）**、
+/// 超出才按动摩擦滑 —— 改完后 15° 的漂移在**所有窗口都是 0.0000**、任意子步数都是 0。
+#[test]
+fn rope_sticks_on_slope_up_to_coulomb_threshold() {
+    let stick = slide_of(0.268, 0.5, 1500); // 15°（tan = 0.268 < 0.5）
+    let slide = slide_of(0.700, 0.5, 1500); // 35°（tan = 0.700 > 0.5）
+    let no_fric = slide_of(0.268, 0.0, 1500); // 15° 但无摩擦
+    println!(
+        "后段沿坡位移：15°/μ=0.5 {stick:+.4} m | 35°/μ=0.5 {slide:+.4} m | 15°/μ=0 {no_fric:+.4} m"
+    );
+
+    assert!(
+        stick.abs() < 0.005,
+        "tanθ = 0.268 < μ = 0.5 ⇒ 该被静摩擦**停住**（实测 +0.0000，判据给 0.005）"
+    );
+    assert!(
+        slide < -1.0,
+        "tanθ = 0.700 > μ = 0.5 ⇒ 该**滑下坡**（实测 −34.0 m，判据给 −1.0；负 = 往坡下）"
+    );
+    assert!(
+        no_fric < -1.0,
+        "μ = 0 ⇒ 即便 15° 也该滑（实测 −66.3 m）——这条用来证明上面那个'停住'来自摩擦"
+    );
+}
+
 /// 自由下落的绳落到**真实三角网地板**上：每个粒子就位于半径高度、且已静止。
 ///
 /// 这条走的是引擎真正那条**提供者通道**（`TriMesh` 的 `ProviderColliders`）——不是自造 collider。
@@ -218,7 +306,7 @@ fn rope_rests_on_real_trimesh_provider() {
     );
     assert_eq!(
         state_hash(&r),
-        0xdf50_e584_d880_fb9f,
+        0x36ea_adb9_02cc_8481,
         "末态哈希是**冻结基线**（换代级：改接触口径必须重冻并登记）"
     );
 }

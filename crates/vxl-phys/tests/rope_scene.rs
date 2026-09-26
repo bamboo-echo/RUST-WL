@@ -131,7 +131,7 @@ fn rope_rests_on_scene_terrain_beside_a_rigid_body() {
         "同构造两跑绳末态必须逐位相同（门面接线后仍是纯顺序推进）"
     );
     assert_eq!(
-        hash, 0x565a_8528_36ae_411b,
+        hash, 0xba9d_2141_fed2_6d80,
         "绳末态哈希是**冻结基线**（换代级：改绳索数值/接触口径必须重冻并登记）"
     );
 }
