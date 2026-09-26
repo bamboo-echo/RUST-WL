@@ -1028,6 +1028,7 @@ dependencies = [
  "vxl-phys-integrate",
  "vxl-phys-narrow",
  "vxl-phys-replay",
+ "vxl-phys-soft",
  "vxl-phys-solver",
  "vxl-phys-splat",
  "vxl-phys-terrain",
@@ -1123,6 +1124,10 @@ dependencies = [
 [[package]]
 name = "vxl-phys-soft"
 version = "0.1.0"
+dependencies = [
+ "vxl-phys-core",
+ "vxl-phys-terrain",
+]
 
 [[package]]
 name = "vxl-phys-solver"

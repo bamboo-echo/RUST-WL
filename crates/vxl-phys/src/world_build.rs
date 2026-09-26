@@ -40,9 +40,8 @@ impl World {
             providers: Providers::default(),
             provider_bounds: Vec::new(),
             fluids: Vec::new(),
-            fluid_2b: Vec::new(),
-            fluid_boundary_scratch: Vec::new(),
-            fluid_boundary_covered: Vec::new(),
+            fluid_boundary: FluidBoundary::default(),
+            ropes: Vec::new(),
             timings: PhaseTimings::default(),
         }
     }
@@ -150,7 +149,7 @@ impl World {
     pub fn add_fluid(&mut self, mut sys: vxl_phys_fluid::FluidSystem, boundaries: &[u32]) -> usize {
         sys.set_boundaries(boundaries);
         self.fluids.push((sys, boundaries.to_vec(), None));
-        self.fluid_2b.push(false);
+        self.fluid_boundary.two_b.push(false);
         self.fluids.len() - 1
     }
 
@@ -167,7 +166,7 @@ impl World {
         boundaries: &[u32],
     ) -> usize {
         let id = self.add_fluid(sys, boundaries);
-        if let Some(f) = self.fluid_2b.get_mut(id) {
+        if let Some(f) = self.fluid_boundary.two_b.get_mut(id) {
             *f = true;
         }
         id

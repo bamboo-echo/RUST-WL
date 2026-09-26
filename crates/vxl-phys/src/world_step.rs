@@ -25,7 +25,7 @@ impl World {
         for k in 0..substeps {
             self.substep(dt, k == 0, reuse);
         }
-        self.fluid_pass();
+        self.domain_pass();
         self.tick += 1;
     }
 
@@ -42,7 +42,7 @@ impl World {
             return;
         }
         for fi in 0..self.fluids.len() {
-            if self.fluid_2b.get(fi).copied().unwrap_or(false) {
+            if self.fluid_boundary.is_two_b(fi) {
                 self.refresh_fluid_boundary(fi);
             }
             let dt = self.config.dt;
@@ -61,9 +61,9 @@ impl World {
     /// - 静态体也生成（让静态几何对流体**可感**）；反作用只对清醒动态体施加（段③）。
     /// - 确定性：体按索引升序、`set_boundary_particles` 按参数序排布 ⇒ 求和序固定。
     pub(crate) fn refresh_fluid_boundary(&mut self, fi: usize) {
-        self.fluid_boundary_scratch.clear();
-        self.fluid_boundary_covered.clear();
-        self.fluid_boundary_covered.resize(self.bodies.len(), false);
+        self.fluid_boundary.scratch.clear();
+        self.fluid_boundary.covered.clear();
+        self.fluid_boundary.covered.resize(self.bodies.len(), false);
         let bb = fluid_stepper::bounds_of(&self.fluids[fi])
             .or_else(|| particle_bounds(&self.fluids[fi].0));
         if let Some((lo, hi)) = bb {
@@ -84,7 +84,7 @@ impl World {
                 {
                     continue;
                 }
-                self.fluid_boundary_scratch.push((
+                self.fluid_boundary.scratch.push((
                     i as u32,
                     shape,
                     vxl_phys_fluid::BodyPose {
@@ -94,14 +94,14 @@ impl World {
                         angvel: self.bodies.angvel(i),
                     },
                 ));
-                self.fluid_boundary_covered[i] = true;
+                self.fluid_boundary.covered[i] = true;
             }
         }
         // `set_boundary_particles` 要 `&scratch` 而 `self.fluids` 要 `&mut`：借出后归还
         // （`Vec::take` 是 O(1)），避免两个 `self` 字段的可变/共享借用冲突。
-        let scratch = std::mem::take(&mut self.fluid_boundary_scratch);
+        let scratch = std::mem::take(&mut self.fluid_boundary.scratch);
         let _ = self.fluids[fi].0.set_boundary_particles(&scratch);
-        self.fluid_boundary_scratch = scratch;
+        self.fluid_boundary.scratch = scratch;
     }
 
     /// 介质通道**段①**：喷溅场作介质（只累加二次阻力 `F = −½·ρ·Cd·A·|v_rel|·v_rel`；
@@ -184,7 +184,7 @@ impl World {
             if pos.is_empty() {
                 continue;
             }
-            let two_b = self.fluid_2b.get(fi).copied().unwrap_or(false);
+            let two_b = self.fluid_boundary.is_two_b(fi);
             // 粒子包围盒（每 tick 一次 O(n)；体先过包围盒，避免全库逐体采样）。
             let (lo, hi) = match particle_bounds(sys) {
                 Some(b) => b,
@@ -195,7 +195,7 @@ impl World {
                 if !self.bodies.is_dynamic(i) || !self.bodies.awake[i] {
                     continue; // 睡眠体不受外力（唤醒后自然恢复；与"睡眠按静态处理"一致）
                 }
-                if two_b && self.fluid_boundary_covered.get(i).copied().unwrap_or(false) {
+                if two_b && self.fluid_boundary.covered.get(i).copied().unwrap_or(false) {
                     continue; // 2b 已覆盖 ⇒ 二选一，不叠加
                 }
                 let c = self.bodies.position[i];
@@ -252,7 +252,7 @@ impl World {
     /// = `F·dt`（施加次数 × 子步 dt = tick dt）。睡眠体不吃外力（与 2a 同口径）。
     pub(crate) fn fluid_reaction_pass(&mut self) {
         for fi in 0..self.fluids.len() {
-            if !self.fluid_2b.get(fi).copied().unwrap_or(false) {
+            if !self.fluid_boundary.is_two_b(fi) {
                 continue;
             }
             let reacts = fluid_stepper::reactions_of(&self.fluids[fi]);

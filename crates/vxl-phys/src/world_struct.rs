@@ -31,12 +31,10 @@ pub struct World {
     pub(crate) provider_bounds: Vec<Aabb>,
     /// 已注册流体系统（液体域；边界 provider id 随行存档；第三槽 = 可选的**卡上步进后端**，见 §13.7）。
     pub(crate) fluids: Vec<crate::world_step::fluid_stepper::FluidSlot>,
-    /// **2b（Akinci 边界粒子）开关**，与 `fluids` 同序：true = 每 tick 按近域体重建边界粒子、
-    /// 反作用（力 + 力矩）回流；被覆盖的体由 2b 接管、2a 让位。`add_fluid` 一律 false ⇒ **既有场景逐位不变**（显式选择档）。
-    pub(crate) fluid_2b: Vec<bool>,
-    /// 边界粒子生成的暂存 `(体 id, 形状, 位姿)`（复用免每 tick 分配）。
-    pub(crate) fluid_boundary_scratch: Vec<(u32, Shape, vxl_phys_fluid::BodyPose)>,
-    /// **2b 覆盖集**（与 `bodies` 同序，每 tick 重建）：上次进了边界粒子集的体。
-    pub(crate) fluid_boundary_covered: Vec<bool>,
+    /// **2b 边界粒子那一族的成组状态**（开关 / 暂存 / 覆盖集；定义见 `world_soft.rs`）——
+    /// 收成一个结构是为给软体域腾成员位（本结构受 god 门成员棘轮，只准减）。
+    pub(crate) fluid_boundary: FluidBoundary,
+    /// **软体域：绳索**（`World::add_rope` 注册；`rope_pass` 每 tick 推进一次，空集零成本短路）。
+    pub(crate) ropes: Vec<vxl_phys_soft::Rope>,
     pub(crate) timings: PhaseTimings,
 }

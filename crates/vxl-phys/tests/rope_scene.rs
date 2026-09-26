@@ -1,0 +1,137 @@
+//! **门面级绳索判据**（T1 第二片）：绳索接进 `World` 之后，在**真实场景地形**上的黑盒读数。
+//!
+//! 三条判据（机器无关：无计时、无随机、纯 CPU）：
+//! ① **落在场景地形上**：逐粒子就位间隙 ≈ 0 —— 走的是 `Providers` 通道（与刚体、与
+//!    `tests/provider_shape_coverage.rs` 同一根），不是测试里自造的 collider；
+//! ② **与刚体同场互不干扰**：同场景的盒仍按自己的路径落在地形上（本片绳只读提供者，
+//!    与刚体既无接触也无耦合 ⇒ 两条通道并存）；
+//! ③ **确定性**：同构造两跑，绳末态**逐位相同** + 末态哈希**冻结基线**。
+//!
+//! ⚠️ **换代级**：哈希是冻结值 ⇒ 改绳索数值/接触口径必须重冻并在此登记
+//! （同 `default_stability` / `rope_minimal` 的惯例）。
+//!
+//! **本片边界**：绳不吃刚体（无 Akinci 耦合）、无摩擦、无自碰撞 —— 都属后续切片。
+
+use vxl_phys::*;
+use vxl_phys_core::{PhysConfig, Quat, Shape, Vec3};
+use vxl_phys_soft::Rope;
+use vxl_phys_terrain::mesh::TriMesh;
+
+/// 平地板（y = 0）：8×8 格、±4 m（与另外两条提供者判据同几何）。
+fn flat_mesh() -> TriMesh {
+    const N: usize = 8;
+    const S: f32 = 4.0;
+    let mut verts: Vec<Vec3> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for iz in 0..=N {
+        for ix in 0..=N {
+            let x = -S + (2.0 * S * ix as f32) / N as f32;
+            let z = -S + (2.0 * S * iz as f32) / N as f32;
+            verts.push(Vec3::new(x, 0.0, z));
+        }
+    }
+    for iz in 0..N as u32 {
+        for ix in 0..N as u32 {
+            let a = iz * (N as u32 + 1) + ix;
+            let c = a + 1;
+            let d = a + N as u32 + 1;
+            let e = d + 1;
+            tris.push([a, d, c]);
+            tris.push([c, d, e]);
+        }
+    }
+    TriMesh::new(verts, tris)
+}
+
+/// 绳末态位置的 **FNV-1a**（按 f32 位模式逐字节）。
+fn rope_hash(r: &Rope) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for p in &r.pos {
+        for v in [p.x, p.y, p.z] {
+            for b in v.to_bits().to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    h
+}
+
+/// 一个"绳 + 刚体同场"的场景跑 `ticks` 步，返回（绳就位间隙最低/最高、绳末速、盒 y、绳哈希）。
+fn run_scene(ticks: usize) -> (f32, f32, f32, f32, u64) {
+    const NODES: usize = 33;
+    const RADIUS: f32 = 0.02;
+    let mut w = World::new(PhysConfig::default());
+    let _mesh = w.add_mesh(flat_mesh());
+    // 同场刚体：证明两条通道并存（绳只读提供者，不吃刚体）。
+    let b = w.add_dynamic(
+        Shape::Box {
+            half: Vec3::splat(0.2),
+        },
+        Vec3::new(1.5, 1.0, 0.0),
+        Quat::IDENTITY,
+        1000.0,
+    ) as usize;
+
+    let mut rope = Rope::line(
+        Vec3::new(-0.4, 1.2, 0.0),
+        Vec3::new(0.4, 1.2, 0.0),
+        NODES,
+        RADIUS,
+    );
+    // 两端松开 ⇒ 整条绳落到场景地形上（判"接触就位"）。
+    rope.set_pinned(0, false);
+    rope.set_pinned(NODES - 1, false);
+    rope.damping = 0.999;
+    let ri = w.add_rope(rope);
+    assert_eq!(ri, 0, "第一条绳索的索引应为 0");
+
+    for _ in 0..ticks {
+        w.step();
+    }
+
+    let r = w.rope(0).expect("rope 0 已注册");
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for p in &r.pos {
+        lo = lo.min(p.y - RADIUS);
+        hi = hi.max(p.y - RADIUS);
+    }
+    let vmax = r.vel.iter().map(|v| v.length()).fold(0.0f32, f32::max);
+    (lo, hi, vmax, w.bodies.position[b].y, rope_hash(r))
+}
+
+#[test]
+fn rope_rests_on_scene_terrain_beside_a_rigid_body() {
+    let (lo, hi, vmax, box_y, hash) = run_scene(900);
+    let (_, _, _, _, hash2) = run_scene(900);
+    println!(
+        "绳就位间隙 最低={lo:.5} 最高={hi:.5} | 绳末速max={vmax:.3e} | 同场盒 y={box_y:.4} | 哈希={hash:016x}"
+    );
+
+    assert!(
+        lo > -0.01,
+        "没有粒子该陷进场景地形（最低间隙 {lo:.5}）——红了说明门面这条提供者通道没接上"
+    );
+    assert!(
+        hi < 0.05,
+        "绳该整体贴在场景地形上（最高间隙 {hi:.5}）——大了说明有粒子悬在空中"
+    );
+    assert!(
+        vmax < 1e-2,
+        "绳该已静止（末速 {vmax:.3e}）——没停说明接触/阻尼有问题"
+    );
+    assert!(
+        (box_y - 0.2).abs() < 0.05,
+        "同场刚体该照常落在地形上（半高 0.2，实得 {box_y:.4}）——\n\
+         绳索通道**不该**影响刚体管线（本片两者无耦合）"
+    );
+    assert_eq!(
+        hash, hash2,
+        "同构造两跑绳末态必须逐位相同（门面接线后仍是纯顺序推进）"
+    );
+    assert_eq!(
+        hash, 0x565a_8528_36ae_411b,
+        "绳末态哈希是**冻结基线**（换代级：改绳索数值/接触口径必须重冻并登记）"
+    );
+}

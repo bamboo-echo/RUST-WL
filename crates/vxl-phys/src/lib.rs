@@ -8,18 +8,17 @@
 //! 1. 力场 → 2. 速度积分 → 3. 宽相 → 4. 窄相 → 5. 求解 + 岛级休眠
 //!    → 6. 位置积分。
 //!
-//! 液体域（切片1，单向耦合）：每 tick 体子步全部完成后，`fluid_pass` 以流体
-//! 自身的固定子步数推进全部流体系统（`World::add_fluid` 注册）。
+//! 域通道（每 tick、体子步全部完成之后）：`fluid_pass` 推进全部流体系统（`World::add_fluid` 注册）、
+//! `rope_pass` 推进全部绳索（`World::add_rope` 注册，软体域/T1）；两者都空集短路。
 //!
 //! 确定性（§5）：固定步长、严格 f32、有序归约；`state_hash()` 每 60 tick 比对。
 
 #![forbid(unsafe_code)]
 
 pub use vxl_phys_broad::{Aabb, BroadPhase, BvhBroadPhase, GridBroadPhase};
-pub use vxl_phys_core as core;
 pub use vxl_phys_core::{
-    BodyId, BodySet, BodyType, FrictionModel, JobSystem, Material, PhaseArena, PhysConfig, Preset,
-    Quat, ScopedPool, SerialJobSystem, Shape, Vec3,
+    self as core, BodyId, BodySet, BodyType, FrictionModel, JobSystem, Material, PhaseArena,
+    PhysConfig, Preset, Quat, ScopedPool, SerialJobSystem, Shape, Vec3,
 };
 pub use vxl_phys_field::{FieldRegistry, ForceField, GravityField};
 pub use vxl_phys_integrate::Integrator;
@@ -40,10 +39,11 @@ mod world_body;
 mod world_build;
 mod world_ccd;
 mod world_health;
+mod world_soft;
 mod world_step;
 mod world_struct;
 pub(crate) use self::props::*;
-pub use self::{arenas::*, impact::*, providers::*, types::*, world_struct::*};
+pub use self::{arenas::*, impact::*, providers::*, types::*, world_soft::*, world_struct::*};
 // ↑ 子模块顶层条目再导出（impl-only 模块不入 glob，避免 unused）
 
 #[cfg(test)]

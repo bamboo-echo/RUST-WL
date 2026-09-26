@@ -98,16 +98,29 @@ impl Rope {
         (self.pos[k + 1] - self.pos[k]).length()
     }
 
-    /// 推进一个 `dt`（内部再切 `substeps` 个子步）；接触走 `providers` 里 `ids` 指定的提供者。
-    pub fn step(&mut self, dt: f32, gravity: Vec3, providers: &dyn ProviderColliders, ids: &[u32]) {
+    /// 推进一个 `dt`（内部再切 `substeps` 个子步）；接触走 `providers` 的 **id `0..provider_count`**
+    /// （门面注册的提供者就是这段连续 id；用"个数"而不是 id 列表 ⇒ 门面不必每 tick 造一个 Vec）。
+    pub fn step(
+        &mut self,
+        dt: f32,
+        gravity: Vec3,
+        providers: &dyn ProviderColliders,
+        provider_count: u32,
+    ) {
         let h = dt / self.substeps.max(1) as f32;
         for _ in 0..self.substeps {
-            self.substep(h, gravity, providers, ids);
+            self.substep(h, gravity, providers, provider_count);
         }
     }
 
     /// 单个子步：预测 → 距离约束 → 接触 → 速度回写。
-    fn substep(&mut self, h: f32, gravity: Vec3, providers: &dyn ProviderColliders, ids: &[u32]) {
+    fn substep(
+        &mut self,
+        h: f32,
+        gravity: Vec3,
+        providers: &dyn ProviderColliders,
+        provider_count: u32,
+    ) {
         let n = self.pos.len();
         // ① 预测：`v ← v + g·h`、`x_prev ← x`、`x ← x + v·h`（钉住粒子原地不动、速度清零）。
         for i in 0..n {
@@ -144,8 +157,8 @@ impl Rope {
             self.pos[j] += dir * (self.inv_mass[j] * dl);
         }
         // ③ 接触：位置级投影（只有真穿透才推 ⇒ 无恢复系数）。
-        if self.radius >= 0.0 && !ids.is_empty() {
-            self.project_contacts(providers, ids);
+        if self.radius >= 0.0 && provider_count > 0 {
+            self.project_contacts(providers, provider_count);
         }
         // ④ 速度回写 + 阻尼。
         let inv_h = 1.0 / h;
@@ -159,14 +172,14 @@ impl Rope {
     }
 
     /// 逐粒子把穿透推到面上（多接触按 Gauss-Seidel 顺序逐个推；带内预判不推）。
-    fn project_contacts(&mut self, providers: &dyn ProviderColliders, ids: &[u32]) {
+    fn project_contacts(&mut self, providers: &dyn ProviderColliders, provider_count: u32) {
         // `buf` 借出去才能再借 `self.pos`（同窄相 `prims.rs` 的 `mem::take` 手法）。
         let mut buf = std::mem::take(&mut self.buf);
         for i in 0..self.pos.len() {
             if self.inv_mass[i] == 0.0 {
                 continue;
             }
-            for &id in ids {
+            for id in 0..provider_count {
                 buf.clear();
                 if !providers.contacts_sphere(id, self.pos[i], self.radius, self.skin, &mut buf) {
                     continue;

@@ -4,12 +4,12 @@ use super::*;
 impl World {
     /// 该流体是否开了 2b（对账/测试用）。
     pub fn fluid_boundary_coupling(&self, fluid: usize) -> bool {
-        self.fluid_2b.get(fluid).copied().unwrap_or(false)
+        self.fluid_boundary.is_two_b(fluid)
     }
 
     /// 2b **覆盖集**快照（与 `bodies` 同序；上次边界粒子生成的结果）。
     pub fn fluid_boundary_covered(&self) -> &[bool] {
-        &self.fluid_boundary_covered
+        &self.fluid_boundary.covered
     }
 
     /// 已注册流体系统及其边界 provider id（渲染读 `.0.positions()` / `.0.velocities()`；第三槽 = 卡上步进后端）。

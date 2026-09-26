@@ -114,7 +114,7 @@ fn rope_sags_to_catenary_stays_inextensible_and_deterministic() {
         r.damping = 0.999;
         let mut worst = 0.0f32;
         for t in 0..6000 {
-            r.step(DT, GRAVITY, &NoProviders, &[]);
+            r.step(DT, GRAVITY, &NoProviders, 0);
             if t >= 100 {
                 worst = worst.max(worst_len_err(&r));
             }
@@ -187,7 +187,7 @@ fn rope_rests_on_real_trimesh_provider() {
     r.set_pinned(NODES - 1, false);
     r.damping = 0.999;
     for _ in 0..4000 {
-        r.step(DT, GRAVITY, &mesh, &[0]);
+        r.step(DT, GRAVITY, &mesh, 1);
     }
 
     let mut lo = f32::INFINITY;
