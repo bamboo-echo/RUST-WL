@@ -65,11 +65,9 @@ pub struct Rope {
     /// **刚体的速度增量**（与 `step` 传入的 `bodies` 同序，每 tick 开头清零）：
     /// 门面做 `bodies.linvel[i] += body_dv[i]`（在体解算之前施加 ⇒ 下一 tick 生效）。
     pub body_dv: Vec<Vec3>,
-    /// 子步内**虚拟位移**（同上序）：只用于接触查询，让同一子步里后续粒子看到"体已被推开"
-    /// —— 不做这一层就是 **Jacobi 式叠加**（实测把一个 2.29 m/s 下落的盒子踹成 **+31.9 m/s**）。
+    /// 子步内**虚拟位移**（同上序）：体自己走的 + 我们推开的，**增量累加** —— 见 `project_body_contacts`
+    /// 里那条"不能乘整段时间"的注（那是所有"参数怎么调都逃逸"的真凶）。
     body_disp: Vec<Vec3>,
-    /// 子步序号（每 tick 清零）：把**体自身的运动** `v·(k·h)` 也算进虚拟位姿。
-    sub_idx: u32,
 }
 
 impl Rope {
@@ -111,7 +109,6 @@ impl Rope {
             reactions: Vec::new(),
             body_dv: Vec::new(),
             body_disp: Vec::new(),
-            sub_idx: 0,
         }
     }
 
@@ -148,11 +145,9 @@ impl Rope {
         self.body_dv.resize(bodies.len(), Vec3::ZERO);
         self.body_disp.clear();
         self.body_disp.resize(bodies.len(), Vec3::ZERO);
-        self.sub_idx = 0;
         let h = dt / self.substeps.max(1) as f32;
         for _ in 0..self.substeps {
             self.substep(h, gravity, providers, provider_count, bodies);
-            self.sub_idx += 1;
         }
     }
 
@@ -273,12 +268,13 @@ impl Rope {
         let inv_h = 1.0 / h;
         let friction = self.friction;
         let radius = self.radius;
-        let t = self.sub_idx as f32 * h;
         for (j, b) in bodies.iter().enumerate() {
-            // **虚拟位姿**：体自身本 tick 已经走的位移 + 本子步里已被我们推开的位移。
-            // ⚠️ 速度项必须用**含 `body_dv` 的当前速度**（首版用了 tick 起始速度 ⇒ 盒子已被解停却
-            // 仍按原速"下沉"，穿透每子步重生 ⇒ 冲量叠加到 38（该值只有 2.13））。
-            let vpos = b.pos + (b.linvel + self.body_dv[j]) * t + self.body_disp[j];
+            // **子步内虚拟位姿**（增量推进）：本子步它自己走 `(v + Δv)·h`，再加上我们推它的修正位移。
+            // ⚠️ **不要写成 `(linvel + Δv)·(sub_idx·h)`**：那会把"当前累计的 Δv"乘上**整段时间**
+            // （最后一个子步乘 8h）⇒ 虚拟位姿被放大 ⇒ 接触几何算错。这是**公式错误**（已修），
+            // 但**实测修完仍然逃逸**（质量比 m ∈ {1,5,20,100,200} 全部逃逸）⇒ 它**不是**逃逸的成因。
+            self.body_disp[j] += (b.linvel + self.body_dv[j]) * h;
+            let vpos = b.pos + self.body_disp[j];
             for i in 0..self.pos.len() {
                 if self.inv_mass[i] == 0.0 {
                     continue;
