@@ -9,8 +9,8 @@
 //! 与窄相同一个 id 空间，见 `world_step.rs` 的 `fluid_pass` 同款段位）。**没有绳索的场景逐位不变**
 //! （`ropes` 空 ⇒ `rope_pass` 首行短路）⇒ 默认档判据不受影响。
 //!
-//! **本片边界**：绳索只读**提供者**（地形）；与刚体的双向耦合（Akinci 边界）、摩擦（切向）、
-//! 自碰撞都属后续切片。
+//! **本片边界**：绳索的接触走**提供者**（地形）+ **刚体代理**（形状：Sphere/Box/Capsule）；
+//! 自碰撞、`Compound`/`Cylinder`/`Cone`/`ConvexHull` 代理、体积/弯曲约束都属后续切片。
 use super::*;
 
 /// 2b（Akinci 边界粒子）那一族的成组状态（原为 `World` 的 3 个散字段：开关 / 暂存 / 覆盖集）。
@@ -58,7 +58,9 @@ impl World {
     }
 
     /// **软体域通道**：每条绳索按自身 `substeps` 推进一个 `config.dt`；接触走统一提供者通道
-    /// （`0..providers.len()` 全量 id）。**空集 ⇒ 零成本短路**。
+    /// （`0..providers.len()` 全量 id）与**刚体代理**（粒子↔刚体，Akinci 式最小实现）。
+    /// 反作用回填：`bodies.linvel += body_dv`（速度增量）、`bodies.torque += τ/dt`（角冲量 → 力矩口径，
+    /// 与 2b 流体反作用同段位）。**空集 ⇒ 零成本短路**。
     pub(crate) fn rope_pass(&mut self) {
         if self.ropes.is_empty() {
             return;
@@ -66,10 +68,49 @@ impl World {
         let dt = self.config.dt;
         let gravity = self.config.gravity;
         let count = self.providers.len() as u32;
-        // 两个字段互不重叠 ⇒ 可同时借（`&mut self.ropes` + `&self.providers`）。
+        // 刚体代理（每 tick 重建：体在动）。**地形类形状跳过**（`Provider`/`HeightField` 走提供者
+        // 通道；`Compound` 本片不支持 ⇒ 直接跳过，别让它悄悄不清碰）。
+        self.rope_proxies.clear();
+        for i in 0..self.bodies.len() {
+            let shape = self.bodies.shape[i];
+            if matches!(
+                shape,
+                Shape::Provider(_) | Shape::HeightField(_) | Shape::Compound { .. }
+            ) {
+                continue;
+            }
+            self.rope_proxies.push(vxl_phys_soft::RigidProxy {
+                body: i as u32,
+                shape,
+                pos: self.bodies.position[i],
+                rot: self.bodies.rot(i),
+                linvel: self.bodies.linvel[i],
+                inv_mass: if self.bodies.is_dynamic(i) {
+                    self.bodies.inv_mass[i]
+                } else {
+                    0.0
+                },
+            });
+        }
+        let proxies = std::mem::take(&mut self.rope_proxies);
         let providers = &self.providers;
         for rope in &mut self.ropes {
-            rope.step(dt, gravity, providers, count);
+            rope.step(dt, gravity, providers, count, &proxies);
+            for (j, p) in proxies.iter().enumerate() {
+                if p.inv_mass <= 0.0 {
+                    continue; // 静态体不收反作用
+                }
+                if let Some(dv) = rope.body_dv.get(j) {
+                    self.bodies.linvel[p.body as usize] += *dv;
+                }
+            }
+            for r in &rope.reactions {
+                let b = r.body as usize;
+                if b < self.bodies.len() {
+                    self.bodies.torque[b] += r.torque * (1.0 / dt);
+                }
+            }
         }
+        self.rope_proxies = proxies;
     }
 }

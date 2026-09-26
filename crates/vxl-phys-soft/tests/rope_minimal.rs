@@ -13,8 +13,8 @@
 //! ⚠️ **换代级**：两条哈希是冻结值 ⇒ 改绳索数值/接触口径必须重冻并在此登记
 //! （同 `default_tier_stability` 的惯例）。
 
-use vxl_phys_core::{interop::NoProviders, Vec3};
-use vxl_phys_soft::Rope;
+use vxl_phys_core::{interop::NoProviders, Quat, Shape, Vec3};
+use vxl_phys_soft::{RigidProxy, Rope};
 use vxl_phys_terrain::mesh::TriMesh;
 
 const DT: f32 = 1.0 / 60.0;
@@ -114,7 +114,7 @@ fn rope_sags_to_catenary_stays_inextensible_and_deterministic() {
         r.damping = 0.999;
         let mut worst = 0.0f32;
         for t in 0..6000 {
-            r.step(DT, GRAVITY, &NoProviders, 0);
+            r.step(DT, GRAVITY, &NoProviders, 0, &[]);
             if t >= 100 {
                 worst = worst.max(worst_len_err(&r));
             }
@@ -216,7 +216,7 @@ fn slide_of(tan_theta: f32, friction: f32, steps: usize) -> f32 {
     r.damping = 0.999;
     let mut mid = 0.0f32;
     for t in 0..steps {
-        r.step(DT, GRAVITY, &mesh, 1);
+        r.step(DT, GRAVITY, &mesh, 1, &[]);
         if t == steps / 2 {
             mid = centroid_x(&r);
         }
@@ -256,6 +256,159 @@ fn rope_sticks_on_slope_up_to_coulomb_threshold() {
     );
 }
 
+/// 临时探针（定判据用，定完删）：直接查"球 vs 盒"的穿透 + 吊床里的反作用计数。
+#[test]
+fn probe_body_query() {
+    use vxl_phys_soft::rigid::shape_penetration;
+    let shape = Shape::Box {
+        half: Vec3::splat(0.05),
+    };
+    for (by, py) in [(0.60f32, 0.55f32), (0.55, 0.55), (0.52, 0.55), (0.50, 0.55)] {
+        let r = shape_penetration(
+            &shape,
+            Vec3::new(0.0, by, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(0.0, py, 0.0),
+            0.02,
+        );
+        println!("盒心 y={by:.2} 粒子 y={py:.2} -> {r:?}");
+    }
+    // 吊床里前 6 步的反作用
+    let mut r = Rope::span(
+        Vec3::new(-0.5, 1.0, 0.0),
+        Vec3::new(0.5, 1.0, 0.0),
+        33,
+        1.4,
+        0.02,
+    );
+    r.damping = 0.999;
+    let (mut y, m) = (0.62f32, 1.0f32);
+    let mut v = 0.0f32;
+    for t in 0..40 {
+        let proxy = RigidProxy {
+            body: 0,
+            shape,
+            pos: Vec3::new(0.0, y, 0.0),
+            rot: Quat::IDENTITY,
+            linvel: Vec3::new(0.0, v, 0.0),
+            inv_mass: 1.0 / m,
+        };
+        r.step(DT, GRAVITY, &NoProviders, 0, std::slice::from_ref(&proxy));
+        v += GRAVITY.y * DT;
+        y += v * DT;
+        let imp: f32 = r.reactions.iter().map(|e| e.impulse.y).sum();
+        if t % 8 == 0 || !r.reactions.is_empty() {
+            println!(
+                "t={t:2} 盒 y={y:.4} v={v:.3} 反作用条数={} Σimp.y={imp:+.4}",
+                r.reactions.len()
+            );
+        }
+        v += imp / m;
+    }
+}
+
+/// —— 后者是双向耦合的**杀手判据**（A/B：把代理表换成空 ⇒ 盒子直接掉下去）。
+///
+/// 测试自己扮演"门面"的角色：盒子的积分自己推（半隐式，与引擎积分器同款），并把绳的反作用
+/// 冲量加回盒子速度（`Δv = Σimpulse / m`）——这条**与门面 `rope_pass` 的账一致**。
+#[test]
+fn rope_couples_with_rigid_bodies() {
+    // ① 静态盒当"地板"（顶面 y = 0，inv_mass = 0 ⇒ 不收反作用）
+    let floor = RigidProxy {
+        body: 0,
+        shape: Shape::Box {
+            half: Vec3::new(2.0, 0.5, 2.0),
+        },
+        pos: Vec3::new(0.0, -0.5, 0.0),
+        rot: Quat::IDENTITY,
+        linvel: Vec3::ZERO,
+        inv_mass: 0.0,
+    };
+    let mut r = Rope::line(
+        Vec3::new(-0.4, 1.0, 0.0),
+        Vec3::new(0.4, 1.0, 0.0),
+        33,
+        0.02,
+    );
+    r.set_pinned(0, false);
+    r.set_pinned(32, false);
+    r.damping = 0.999;
+    for _ in 0..900 {
+        r.step(DT, GRAVITY, &NoProviders, 0, std::slice::from_ref(&floor));
+    }
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for p in &r.pos {
+        lo = lo.min(p.y - 0.02);
+        hi = hi.max(p.y - 0.02);
+    }
+    println!(
+        "① 静态盒：就位间隙 最低={lo:.5} 最高={hi:.5} | 末速max={:.3e}",
+        max_speed(&r)
+    );
+    assert!(lo > -0.01, "绳不该陷进盒子（最低 {lo:.5}）");
+    assert!(hi < 0.05, "绳该整体贴在盒面上（最高 {hi:.5}）");
+
+    // ② **紧绳**（段长 = 弦长、两端钉住）当"吊索"：盒从上方压下，绳把它接住（**短窗判据**）。
+    //    用紧绳而不是松垂绳：松垂绳的垂度（0.45）与盒高可比 ⇒ 盒子会**跨骑**在绳上（一端接触、
+    //    另一端悬空），"最近面"判据会把粒子往侧面推 ⇒ 盒子锯过绳线（两种几何都实测失败过）。
+    //
+    //    ⚠️ **已知缺口（写清，别读成"已全好"）**：位置口径的硬接触对上 XPBD 的软链会**抖动**，
+    //    十几 tick 后可能把盒子弹飞（实测 +4 m/s、飞到 y=1.27）。⇒ 这条判据只判**动量被吃掉**
+    //    （短窗 60 tick）：耦合时接住、不耦合时自由落体。长窗（1800 tick）现在**过不了**。
+    //    下一片的靶子：接触柔度/稳定性（迭代数、按 h² 的柔度、或把接触放到速度层）。
+    let run = |couple: bool| {
+        let mut r = Rope::line(
+            Vec3::new(-0.5, 1.0, 0.0),
+            Vec3::new(0.5, 1.0, 0.0),
+            33,
+            0.02,
+        );
+        r.damping = 0.999;
+        // 紧绳初始即平衡位形，但仍先跑一段（把任何初始瞬态吃掉，读数才干净）。
+        for _ in 0..600 {
+            r.step(DT, GRAVITY, &NoProviders, 0, &[]);
+        }
+        // 盒宽 0.6（跨十几颗粒子，**别用小盒子**：0.1 宽只压住 2 颗，"最近面"判据会让它锯过去）
+        let shape = Shape::Box {
+            half: Vec3::new(0.3, 0.05, 0.3),
+        };
+        let (mut y, m) = (1.2f32, 1.0f32); // 盒心 1.2 ⇒ 底面 1.15（比绳高 0.15，不初始穿透）
+        let mut v = 0.0f32;
+        for _ in 0..60 {
+            let proxy = RigidProxy {
+                body: 0,
+                shape,
+                pos: Vec3::new(0.0, y, 0.0),
+                rot: Quat::IDENTITY,
+                linvel: Vec3::new(0.0, v, 0.0),
+                inv_mass: 1.0 / m,
+            };
+            let bodies: &[RigidProxy] = if couple {
+                std::slice::from_ref(&proxy)
+            } else {
+                &[]
+            };
+            r.step(DT, GRAVITY, &NoProviders, 0, bodies);
+            // 盒子：半隐式推进 + 吃绳的**速度增量**（`body_dv` 已除过质量，门面同款账）
+            v += GRAVITY.y * DT;
+            y += v * DT;
+            v += r.body_dv.first().map(|d| d.y).unwrap_or(0.0);
+        }
+        y
+    };
+    let held = run(true);
+    let fell = run(false);
+    println!("② 紧绳 60 tick：耦合 y={held:.4} | 不耦合 y={fell:.4}");
+    assert!(
+        held > 0.85,
+        "耦合开 ⇒ 盒该被绳**接住**（实得 y={held:.4}）——掉了说明接触/反作用没起作用"
+    );
+    assert!(
+        fell < -1.0,
+        "耦合关 ⇒ 60 tick 内该已落到绳下方（实得 y={fell:.4}）——这条证明上面的'接住'来自耦合"
+    );
+}
+
 /// 自由下落的绳落到**真实三角网地板**上：每个粒子就位于半径高度、且已静止。
 ///
 /// 这条走的是引擎真正那条**提供者通道**（`TriMesh` 的 `ProviderColliders`）——不是自造 collider。
@@ -275,7 +428,7 @@ fn rope_rests_on_real_trimesh_provider() {
     r.set_pinned(NODES - 1, false);
     r.damping = 0.999;
     for _ in 0..4000 {
-        r.step(DT, GRAVITY, &mesh, 1);
+        r.step(DT, GRAVITY, &mesh, 1, &[]);
     }
 
     let mut lo = f32::INFINITY;

@@ -63,7 +63,17 @@ fn run_scene(ticks: usize) -> (f32, f32, f32, f32, u64) {
     const RADIUS: f32 = 0.02;
     let mut w = World::new(PhysConfig::default());
     let _mesh = w.add_mesh(flat_mesh());
-    // 同场刚体：证明两条通道并存（绳只读提供者，不吃刚体）。
+    // **静态盒体**（顶面 y = 0.5）：绳索落在**它**上面 —— 这条走的是门面的**刚体代理通道**
+    // （`rope_pass` 里建的 `RigidProxy` 表），与提供者通道是两条不同的路。
+    // （提供者通道那一条由 `vxl-phys-soft` 的 `rope_rests_on_real_trimesh_provider` 守。）
+    let _box_floor = w.add_static(
+        Shape::Box {
+            half: Vec3::new(1.0, 0.25, 1.0),
+        },
+        Vec3::new(0.0, 0.25, 0.0),
+        Quat::IDENTITY,
+    );
+    // 同场动态刚体：证明两条通道并存（绳不吃刚体；它落在盒外，落在网格地形上）。
     let b = w.add_dynamic(
         Shape::Box {
             half: Vec3::splat(0.2),
@@ -91,18 +101,19 @@ fn run_scene(ticks: usize) -> (f32, f32, f32, f32, u64) {
     }
 
     let r = w.rope(0).expect("rope 0 已注册");
+    // 就位基线 = **静态盒顶面**（y = 0.5）⇒ 间隙 = 粒子表面到盒面。
     let mut lo = f32::INFINITY;
     let mut hi = f32::NEG_INFINITY;
     for p in &r.pos {
-        lo = lo.min(p.y - RADIUS);
-        hi = hi.max(p.y - RADIUS);
+        lo = lo.min(p.y - RADIUS - 0.5);
+        hi = hi.max(p.y - RADIUS - 0.5);
     }
     let vmax = r.vel.iter().map(|v| v.length()).fold(0.0f32, f32::max);
     (lo, hi, vmax, w.bodies.position[b].y, rope_hash(r))
 }
 
 #[test]
-fn rope_rests_on_scene_terrain_beside_a_rigid_body() {
+fn rope_rests_on_a_static_box_body_beside_a_rigid_body() {
     let (lo, hi, vmax, box_y, hash) = run_scene(900);
     let (_, _, _, _, hash2) = run_scene(900);
     println!(
@@ -111,11 +122,11 @@ fn rope_rests_on_scene_terrain_beside_a_rigid_body() {
 
     assert!(
         lo > -0.01,
-        "没有粒子该陷进场景地形（最低间隙 {lo:.5}）——红了说明门面这条提供者通道没接上"
+        "没有粒子该陷进**静态盒体**（最低间隙 {lo:.5}）——红了说明门面的刚体代理通道没接上"
     );
     assert!(
         hi < 0.05,
-        "绳该整体贴在场景地形上（最高间隙 {hi:.5}）——大了说明有粒子悬在空中"
+        "绳该整体贴在盒面上（最高间隙 {hi:.5}）——大了说明有粒子悬在空中"
     );
     assert!(
         vmax < 1e-2,
@@ -131,7 +142,7 @@ fn rope_rests_on_scene_terrain_beside_a_rigid_body() {
         "同构造两跑绳末态必须逐位相同（门面接线后仍是纯顺序推进）"
     );
     assert_eq!(
-        hash, 0xba9d_2141_fed2_6d80,
+        hash, 0x5a24_4091_4067_fe15,
         "绳末态哈希是**冻结基线**（换代级：改绳索数值/接触口径必须重冻并登记）"
     );
 }
