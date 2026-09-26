@@ -48,6 +48,12 @@ pub struct Rope {
     /// 冲量的位置代理**——静止在斜面上时它 ≈ `|g_n|·h²`（重力在法向的分量），而切向位移
     /// ≈ `|g_t|·h²` ⇒ 这条判据恰好退化成解析的静摩擦阈值 **`tanθ ≤ μ`**（判据里有双向实测）。
     pub friction: f32,
+    /// **刚体接触的柔度 α_c**（`m/N`，XPBD 口径）：`0` = 硬接触 —— 一个子步内解掉穿透 ⇒
+    /// 会把深穿透**反射成巨大速度**（0.035 m ⇒ 8.4 m/s/粒子），且与 XPBD 的**软链**刚度错配
+    /// ⇒ **抖动、十几 tick 后把体弹飞**（§8.3 的已知缺口）。正数 ⇒ 接触像弹簧：
+    /// 法向修正 `= depth/(w_p + w_b + α̃)`、`α̃ = α_c/h²`（与链的 `compliance` 同一套 XPBD 语义，
+    /// 只是分母换成两体逆质量之和）。物理上 `α_c = 1/k`，`k` = 接触刚度（N/m）。
+    pub contact_compliance: f32,
     /// 速度阻尼（每子步乘一次）：`1.0` = 无阻尼。**不是** XPBD 的组成部分，只为把"悬垂形状"
     /// 做成**稳态读数**（否则绳永远在摆，读数只能取窗口均值，见测量协议 §5）。
     pub damping: f32,
@@ -96,6 +102,10 @@ impl Rope {
             substeps: 8,
             skin: 0.01,
             friction: 0.5,
+            // **默认 0（硬接触）**：实测柔度 α_c = 1e-4 反而**太软**（盒子 60 tick 就沉到 y≈0.26），
+            // 而硬接触是"接得住、留不住"（见 `tests/rigid_coupling_gap.rs` 的钉住判据）。
+            // 旋钮保留：等"入口法线/扫掠"那条结构修法落地后再回来重扫（那才是真因）。
+            contact_compliance: 0.0,
             damping: 1.0,
             buf: Vec::new(),
             reactions: Vec::new(),
@@ -295,7 +305,7 @@ impl Rope {
                 let v_p = (self.pos[i] - self.prev[i]) * inv_h;
                 let v_b = b.linvel + self.body_dv[j];
                 let approach = (v_b - v_p).dot(n);
-                let lam_geom = depth / (w_p + w_b);
+                let lam_geom = depth / (w_p + w_b + self.contact_compliance / (h * h));
                 let lam_vel = if approach > 0.0 {
                     approach * h / (w_p + w_b)
                 } else {
