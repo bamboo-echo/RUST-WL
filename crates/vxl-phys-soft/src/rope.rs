@@ -40,8 +40,16 @@ pub struct Rope {
     pub compliance: f32,
     /// 粒子半径（接触用，`m`）：`0` = 质点（贴在面上）。
     pub radius: f32,
-    /// 子步数（每子步 1 次约束迭代）。
+    /// 子步数（每子步内再跑 `chain_iterations` 遍距离约束）。
     pub substeps: u32,
+    /// **链的迭代数**（每子步对距离约束扫几遍）：`1` = 现状（**默认，逐位不变**）；`>1` ⇒ 链更"硬"。
+    ///
+    /// **为什么需要这个旋钮**（§8.4.8.1 的结论）：`compliance = 0` 只表示"无穷刚度"的**连续**口径，
+    /// 离散下每子步 1 遍 Gauss-Seidel 会让张力**每子步只传约一颗粒子** ⇒ 绳在静载下**蠕变**。
+    /// 实测（2026-09-27）：紧绳两端钉住、1.0 m 跨距，自己先垂到 **0.13 m** ⇒ 它是个**软弹簧**；
+    /// 1 kg 盒压上去后长窗以 ~0.1 m/s **匀速下沉**（≈1.7 mm/tick）。提高本值 = 约束收敛更充分。
+    /// **默认必须留在 1**：默认档冻结值不得动（`rope_scene` 的冻结哈希守）。
+    pub chain_iterations: u32,
     /// 接触皮肤带（预判接触宽度，`m`）。
     pub skin: f32,
     /// **接触摩擦系数 μ**（库仑，位置口径）：每个接触把本子步的**切向滑移**限制到
@@ -107,6 +115,7 @@ impl Rope {
             compliance: 0.0,
             radius,
             substeps: 8,
+            chain_iterations: 1,
             skin: 0.01,
             friction: 0.5,
             // **默认 0（硬接触）**：实测柔度 α_c = 1e-4 反而**太软**（盒子 60 tick 就沉到 y≈0.26），
@@ -275,28 +284,31 @@ impl Rope {
             self.prev[i] = self.pos[i];
             self.pos[i] += self.vel[i] * h;
         }
-        // ② 距离约束（Gauss-Seidel 顺序推进；`λ` 每子步清零）。
+        // ② 距离约束（Gauss-Seidel 顺序推进；`λ` **每子步**清零、子步内按迭代累加 = XPBD 口径）。
+        //    `chain_iterations` 遍/子步是**链的"硬"旋钮**（默认 1 = 现状、逐位不变；见字段注）。
         for l in self.lambda.iter_mut() {
             *l = 0.0;
         }
         let a_tilde = self.compliance / (h * h);
-        for k in 0..n.saturating_sub(1) {
-            let (i, j) = (k, k + 1);
-            let w = self.inv_mass[i] + self.inv_mass[j];
-            if w <= 0.0 {
-                continue; // 两粒子都钉住 ⇒ 该约束无自由度
+        for _ in 0..self.chain_iterations.max(1) {
+            for k in 0..n.saturating_sub(1) {
+                let (i, j) = (k, k + 1);
+                let w = self.inv_mass[i] + self.inv_mass[j];
+                if w <= 0.0 {
+                    continue; // 两粒子都钉住 ⇒ 该约束无自由度
+                }
+                let d = self.pos[j] - self.pos[i];
+                let len = d.length();
+                if len < 1e-9 {
+                    continue; // 退化（两端重合）：方向无定义，跳过（下一子步自会分开）
+                }
+                let dir = d * (1.0 / len);
+                let c = len - self.rest_len;
+                let dl = (-c - a_tilde * self.lambda[k]) / (w + a_tilde);
+                self.lambda[k] += dl;
+                self.pos[i] -= dir * (self.inv_mass[i] * dl);
+                self.pos[j] += dir * (self.inv_mass[j] * dl);
             }
-            let d = self.pos[j] - self.pos[i];
-            let len = d.length();
-            if len < 1e-9 {
-                continue; // 退化（两端重合）：方向无定义，跳过（下一子步自会分开）
-            }
-            let dir = d * (1.0 / len);
-            let c = len - self.rest_len;
-            let dl = (-c - a_tilde * self.lambda[k]) / (w + a_tilde);
-            self.lambda[k] += dl;
-            self.pos[i] -= dir * (self.inv_mass[i] * dl);
-            self.pos[j] += dir * (self.inv_mass[j] * dl);
         }
         // ③ 接触：位置级投影（只有真穿透才推 ⇒ 无恢复系数）。
         if self.radius >= 0.0 && provider_count > 0 {
