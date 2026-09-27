@@ -22,10 +22,14 @@ use vxl_phys_soft::{RigidProxy, Rope};
 const DT: f32 = 1.0 / 60.0;
 const G: Vec3 = Vec3::new(0.0, -9.81, 0.0);
 
-/// **托住判据**（原"钉住缺口"，2026-09-27 缺口闭合后**翻过来** ⇒ 现在判"**停在绳上**"）：
-/// 紧绳 + 0.6 宽盒 + 1800 tick ⇒ 短窗（60 tick）在绳上、**长窗仍停在 y ≈ 0.98**。
+/// **钉住缺口（3 维口径，2026-09-27 重立）**：紧绳 + 0.6 宽盒 + 1800 tick ⇒ 短窗（60 tick）接住
+/// （0.9968），**长窗横向逃逸**（y = −2599.7、x = +141.4）。
+/// ⚠️ 这一条曾经被翻成"托住"——那是**1 维自扮引擎**的假象（只看 `y`、只吃反作用的 `y` 分量
+/// ⇒ 摩擦的**横向**分量被丢掉 ⇒ 盒子不可能横向滑出）。升到 3 维后**门面与自扮引擎结论一致**
+/// （都托不住）⇒ 原先"门面 vs 自扮差 300×"整条线索是**仪器维数**造成的（§8.4.16）。
+/// 修好后（横向滑出被治住）把断言翻成 `y > 0.5`。
 #[test]
-fn box_on_rope_is_held() {
+fn box_on_rope_is_caught_but_slips_sideways_pinned_gap() {
     let mut r = Rope::line(
         Vec3::new(-0.5, 1.0, 0.0),
         Vec3::new(0.5, 1.0, 0.0),
@@ -36,40 +40,52 @@ fn box_on_rope_is_held() {
     for _ in 0..600 {
         r.step(DT, G, &NoProviders, 0, &[]);
     }
+    // **三维自扮引擎**（§8.4.16）：`pos`/`linvel` 是全 `Vec3`、反作用吃**整个向量**
+    // （`v += dv`、`x += dx`）。**原来是 1 维的**（`pos = Vec3::new(0.0, y, 0.0)`、只吃 `.y`）
+    // ⇒ **摩擦反作用的横向分量被静默丢掉** ⇒ 与 3 维门面对拍时混进"1D vs 3D"这一整类差异。
     let shape = Shape::Box {
         half: Vec3::new(0.3, 0.05, 0.3),
     };
-    let (mut y, m) = (1.2f32, 1.0f32);
-    let mut v = 0.0f32;
-    let mut y_at_60 = 0.0f32;
+    let m = 1.0f32;
+    let (mut pos, mut vel) = (Vec3::new(0.0, 1.2, 0.0), Vec3::ZERO);
+    let mut pos_at_60 = Vec3::ZERO;
     for t in 0..1800 {
         let proxy = RigidProxy {
             body: 0,
             shape,
-            pos: Vec3::new(0.0, y, 0.0),
+            pos,
             rot: Quat::IDENTITY,
-            linvel: Vec3::new(0.0, v, 0.0),
+            linvel: vel,
             inv_mass: 1.0 / m,
         };
         r.step(DT, G, &NoProviders, 0, std::slice::from_ref(&proxy));
-        v += G.y * DT;
-        y += v * DT;
-        v += r.body_dv.first().map(|d| d.y).unwrap_or(0.0);
+        vel += G * DT;
+        pos += vel * DT;
+        if let Some(dv) = r.body_dv.first() {
+            vel += *dv; // 速度口径（整向量：含摩擦的横向分量）
+        }
         // **位置口径回填**（`Rope::body_dx`，§8.4.10）：门面也这么做 ⇒ 自扮引擎必须同口径才可比。
         // 只回速度 = 体每 tick 按 `v·dt` 走过的 `g·dt²` 一去不回（"缓慢下沉"的真因）。
-        y += r.body_dx.first().map(|d| d.y).unwrap_or(0.0);
+        if let Some(dx) = r.body_dx.first() {
+            pos += *dx;
+        }
         if t == 59 {
-            y_at_60 = y;
+            pos_at_60 = pos;
         }
     }
-    println!("短窗(60 tick) y={y_at_60:.4} | 长窗(1800 tick) 末 y={y:.4} v={v:+.3}");
-    assert!(
-        y_at_60 > 0.70,
-        "短窗该被**接住**（阈值 0.70；实测 0.98）——短窗红了说明耦合本身坏了"
+    let (y, y_at_60, x) = (pos.y, pos_at_60.y, pos.x);
+    let v = vel.y;
+    println!(
+        "短窗(60 tick) y={y_at_60:.4} | 长窗(1800 tick) 末 y={y:.4} v={v:+.3} | 横向 x={x:+.4}"
     );
     assert!(
-        y > 0.5,
-        "长窗该**停在绳上**（实测末 y={y:.4}、v={v:+.3}）——红了说明位置口径回填被改坏。\
-         注：这条原先是钉住缺口用（当年末 y ≈ −2091）⇒ 2026-09-27 缺口闭合后翻成托住"
+        y_at_60 > 0.70,
+        "短窗该被**接住**（阈值 0.70；3 维实测 0.9968）——短窗红了说明耦合本身坏了"
+    );
+    assert!(
+        y < -1.0,
+        "长窗**仍会逃逸**（3 维实测末 y={y:.4}、v={v:+.3}、横向 x={x:+.1}）⇒ **缺口是开着的**。\
+         逃逸方式是**横向滑出**（x 跑到 +141 m）——1 维自扮引擎看不见这条路径，\
+         所以它当年托住是**仪器假象**（§8.4.16）；修好后把这条翻成 y > 0.5"
     );
 }

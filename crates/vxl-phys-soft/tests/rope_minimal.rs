@@ -322,15 +322,17 @@ fn rope_couples_with_rigid_bodies() {
         let shape = Shape::Box {
             half: Vec3::new(0.3, 0.05, 0.3),
         };
-        let (mut y, m) = (1.2f32, 1.0f32); // 盒心 1.2 ⇒ 底面 1.15（比绳高 0.15，不初始穿透）
-        let mut v = 0.0f32;
+        // **3 维自扮引擎**（§8.4.16）：原来只积 `y`、只吃反作用的 `y` 分量 ⇒ 摩擦的**横向**分量被丢
+        // ⇒ "托住"是仪器假象（盒子在 1 维里不可能横向滑出）。这里改成整向量。
+        let m = 1.0f32; // 盒心 1.2 ⇒ 底面 1.15（比绳高 0.15，不初始穿透）
+        let (mut pos, mut vel) = (Vec3::new(0.0, 1.2, 0.0), Vec3::ZERO);
         for _ in 0..60 {
             let proxy = RigidProxy {
                 body: 0,
                 shape,
-                pos: Vec3::new(0.0, y, 0.0),
+                pos,
                 rot: Quat::IDENTITY,
-                linvel: Vec3::new(0.0, v, 0.0),
+                linvel: vel,
                 inv_mass: 1.0 / m,
             };
             let bodies: &[RigidProxy] = if couple {
@@ -342,14 +344,18 @@ fn rope_couples_with_rigid_bodies() {
             // 盒子：半隐式推进 + 吃绳的**两条回填**（门面同款账，§8.4.10）：
             // `body_dv` = 速度口径（消接近速度）；`body_dx` = 位置口径（把钳位压掉的那一份位置补回，
             // 不补就是"每 tick 按 `v·dt` 走过 `g·dt²` 一去不回"的一去不回 = 缓慢下沉）。
-            v += GRAVITY.y * DT;
-            y += v * DT;
-            v += r.body_dv.first().map(|d| d.y).unwrap_or(0.0);
+            vel += GRAVITY * DT;
+            pos += vel * DT;
             if couple {
-                y += r.body_dx.first().map(|d| d.y).unwrap_or(0.0);
+                if let Some(dv) = r.body_dv.first() {
+                    vel += *dv; // 速度口径（整向量，含摩擦的横向分量）
+                }
+                if let Some(dx) = r.body_dx.first() {
+                    pos += *dx;
+                }
             }
         }
-        y
+        pos.y
     };
     let held = run(true);
     let fell = run(false);
