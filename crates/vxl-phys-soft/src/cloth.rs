@@ -1,9 +1,6 @@
-//! CPU cloth slice: fixed-topology grid, three XPBD distance-constraint families, static provider contact.
-//! No self-collision, tearing, wind, or rigid reaction. See docs/PLAN-cloth-cpu-slice1.md.
-
+//! CPU cloth: fixed-topology XPBD grid, static provider contact, optional triangle wind.
 use crate::ClothConstraints;
 use vxl_phys_core::{interop::ProviderColliders, Vec3};
-
 #[derive(Clone, Copy, Debug)]
 struct Edge {
     a: usize,
@@ -23,8 +20,7 @@ impl Edge {
     }
 }
 
-/// Regular triangle sheet. Positions and triangles use row-major, stable indices.
-/// The caller pins nodes explicitly; `triangles` are render topology, not dynamic colliders.
+/// Row-major grid; triangles are render topology, not dynamic colliders. Pin nodes explicitly.
 pub struct ClothSheet {
     pub pos: Vec<Vec3>,
     pub vel: Vec<Vec3>,
@@ -40,11 +36,12 @@ pub struct ClothSheet {
     pub substeps: u32,
     pub iterations: u32,
     pub damping: f32,
+    pub wind: Option<crate::ClothWind>,
+    pub(crate) wind_delta: Vec<Vec3>,
     contacts: Vec<vxl_phys_core::interop::InteropContact>,
 }
 
 impl ClothSheet {
-    /// Each column/row step is a world-space vector; axes must form a nondegenerate sheet.
     pub fn grid(origin: Vec3, col_step: Vec3, row_step: Vec3, cols: usize, rows: usize) -> Self {
         assert!(cols >= 2 && rows >= 2 && cols.checked_mul(rows).is_some());
         assert!(col_step.cross(row_step).length_squared() > 0.0);
@@ -98,6 +95,8 @@ impl ClothSheet {
             substeps: 8,
             iterations: 4,
             damping: 1.0,
+            wind: None,
+            wind_delta: Vec::new(),
             contacts: Vec::new(),
         }
     }
@@ -138,6 +137,7 @@ impl ClothSheet {
     }
 
     fn substep(&mut self, h: f32, gravity: Vec3, providers: &dyn ProviderColliders, count: u32) {
+        self.apply_wind(h);
         for i in 0..self.pos.len() {
             self.prev[i] = self.pos[i];
             if self.inv_mass[i] == 0.0 {
