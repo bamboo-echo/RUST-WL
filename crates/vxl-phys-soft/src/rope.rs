@@ -453,7 +453,11 @@ impl Rope {
                 // 切向：库仑锥（锥内整段吃掉 = 静摩擦；超出按动摩擦滑）——同提供者路径，
                 // 但滑移量取**相对体**的（体在动时绳不该被"粘"在原地）。
                 if friction > 0.0 {
-                    let dp = self.pos[i] - self.prev[i] - b.linvel * h;
+                    // **相对速度与法向同口径**（§8.4.19）：法向那支用 `v_b = b.linvel + body_dv[j]`
+                    // （见上面的 `approach`），摩擦这里原来只用 `b.linvel` ⇒ 子步内 `body_dv` 一涨，
+                    // 滑移估计就**过期** ⇒ 系统性切向偏置（实测：`μ=0` 时盒子 3 维下托得住，
+                    // `μ` 越大横向蠕变越猛 ⇒ ~1 mm/tick、400 tick 滑出绳端）。
+                    let dp = self.pos[i] - self.prev[i] - v_b * h;
                     let t = dp - n * dp.dot(n);
                     let slip = t.length();
                     if slip > 0.0 {
