@@ -49,6 +49,12 @@ fn box_on_rope_is_caught_but_slips_sideways_pinned_gap() {
     let m = 1.0f32;
     let (mut pos, mut vel) = (Vec3::new(0.0, 1.2, 0.0), Vec3::ZERO);
     let mut pos_at_60 = Vec3::ZERO;
+    // **§8.4.18 横向漂移判据**：把两种缺口拆开——**滑出**（接触丢失时盒子仍在绳的高度）
+    // vs **下沉**（接触丢失时它已经沉下去很久）。判据全部机器无关（无计时、无随机）。
+    let (mut t_lost, mut y_lost, mut x_lost) = (usize::MAX, 0.0f32, 0.0f32);
+    let (mut x_abs_max, mut t_xmax) = (0.0f32, 0usize);
+    // ⚠️ 首版判据的坑：`hit == 0` 在**首次接触之前**也成立（盒子还在往下掉）⇒ 必须先建立过接触。
+    let (mut t_x05, mut y_x05) = (usize::MAX, 0.0f32);
     for t in 0..1800 {
         let proxy = RigidProxy {
             body: 0,
@@ -72,15 +78,50 @@ fn box_on_rope_is_caught_but_slips_sideways_pinned_gap() {
         if t == 59 {
             pos_at_60 = pos;
         }
+        if pos.x.abs() > x_abs_max {
+            x_abs_max = pos.x.abs();
+            t_xmax = t;
+        }
+        // **横向漂移起始**（|x| 首次越过 5 cm）：这是"滑出"真正的起点，也是修它要看的量。
+        if t_x05 == usize::MAX && pos.x.abs() > 0.05 {
+            t_x05 = t;
+            y_x05 = pos.y;
+        }
+        let hit = r
+            .entry_faces()
+            .iter()
+            .filter(|(b, _)| *b != u32::MAX)
+            .count();
+        // **逃逸时刻 = 最后一次"还有接触"的 tick**：中间会有瞬时弹跳（丢-又接），
+        // 首版取"第一次丢失"抓到的是 t=14 的弹跳（y 还在 1.16）⇒ 改成取最后一次。
+        if hit > 0 {
+            t_lost = t;
+            y_lost = pos.y;
+            x_lost = pos.x;
+        }
     }
     let (y, y_at_60, x) = (pos.y, pos_at_60.y, pos.x);
     let v = vel.y;
     println!(
-        "短窗(60 tick) y={y_at_60:.4} | 长窗(1800 tick) 末 y={y:.4} v={v:+.3} | 横向 x={x:+.4}"
+        "短窗(60 tick) y={y_at_60:.4} | 长窗(1800 tick) 末 y={y:.4} v={v:+.3} | 横向 x={x:+.4}\n\
+         横向判据：|x|max={x_abs_max:.4}（t={t_xmax}）| 漂移起始 t={t_x05} 时 y={y_x05:.4} | 最后一次接触 t={t_lost} 时 y={y_lost:.4} x={x_lost:+.4}\
+         ⇒ **{}**",
+        if y_lost > 0.8 {
+            "滑出型（丢接触时仍在绳高度）"
+        } else {
+            "下沉型（丢接触前已沉下去）"
+        }
     );
     assert!(
         y_at_60 > 0.70,
         "短窗该被**接住**（阈值 0.70；3 维实测 0.9968）——短窗红了说明耦合本身坏了"
+    );
+    // **判据（§8.4.18）**：当前缺口**是"横向滑出"型**——接触在盒子仍于绳高度时（`y_lost > 0.8`）就丢了。
+    // 这枚钉子把**逃逸方式**钉住：将来若改成"先下沉再沉穿"，这条会红 ⇒ 提示缺口换了形态（不是"修好了"）。
+    assert!(
+        y_lost > 0.8,
+        "当前缺口应为**横向滑出**型（实测丢接触时 y={y_lost:.4}）——红了说明逃逸方式变了，\
+         请连同上面的 `x(t)` 读数一起重新判读"
     );
     assert!(
         y < -1.0,
