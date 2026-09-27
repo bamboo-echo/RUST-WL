@@ -339,10 +339,15 @@ fn rope_couples_with_rigid_bodies() {
                 &[]
             };
             r.step(DT, GRAVITY, &NoProviders, 0, bodies);
-            // 盒子：半隐式推进 + 吃绳的**速度增量**（`body_dv` 已除过质量，门面同款账）
+            // 盒子：半隐式推进 + 吃绳的**两条回填**（门面同款账，§8.4.10）：
+            // `body_dv` = 速度口径（消接近速度）；`body_dx` = 位置口径（把钳位压掉的那一份位置补回，
+            // 不补就是"每 tick 按 `v·dt` 走过 `g·dt²` 一去不回"的一去不回 = 缓慢下沉）。
             v += GRAVITY.y * DT;
             y += v * DT;
             v += r.body_dv.first().map(|d| d.y).unwrap_or(0.0);
+            if couple {
+                y += r.body_dx.first().map(|d| d.y).unwrap_or(0.0);
+            }
         }
         y
     };
