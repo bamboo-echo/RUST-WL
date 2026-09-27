@@ -79,6 +79,18 @@ pub struct Rope {
     /// 子步内**虚拟位移**（同上序）：体自己走的 + 我们推开的，**增量累加** —— 见 `project_body_contacts`
     /// 里那条"不能乘整段时间"的注（那是所有"参数怎么调都逃逸"的真凶）。
     body_disp: Vec<Vec3>,
+    /// **位置口径的补足量**（同上序，每 tick 开头清零；**门面读它做 `bodies.position += dx`**）：
+    /// `Σ −n·w_b·(λ_geom − λ)` —— `λ = min(λ_geom, λ_vel)` 被**速度钳位**压掉的那一部分，
+    /// **只补位置、不补速度**。
+    ///
+    /// **为什么必须有**（§8.4.9 实测）：静载下 `approach ≈ 0 ⇒ λ_vel ≈ 0 ⇒ λ ≈ 0` ⇒ 接触
+    /// **只回速度、不回位置** ⇒ 体每 tick 先按 `v·dt` 走过的 `g·dt² = 2.72 mm` **一去不回**
+    /// （整漏等效速率 `g·dt = 0.1635 m/s`，实测下沉 −0.1354 = **83%**）。
+    /// **为什么用"差值"而不是 `λ_geom` 本身**：`body_disp`（虚拟位姿）已经含了钳位后的那一份
+    /// ⇒ 补足 `λ_geom − λ` 之后，体在本 tick 的**总位置效应恰好 = `λ_geom`**（不重复计账），
+    /// 且**钳位生效时（运动/冲击工况）恒为 0 ⇒ 既有工况逐位不变**。
+    /// 门面做 `bodies.position[p.body] += dx`（速度侧不动 ⇒ 不会把位置修正反射成速度）。
+    pub body_dx: Vec<Vec3>,
     /// **入口面缓存**（与粒子同序）：`(体号, 面号)` —— 该粒子**从哪张面**进的盒（§8.4.5.1）。
     /// 为什么必须缓存：穿越判据只在**进来的那一子步**成立（实测：只做穿越 ⇒ 静止接触 = 零接触、
     /// 盒子自由落体 −3.7868）⇒ 接触是**一段状态**：只要还在该面内侧带内就继续按它推，出去了或
@@ -127,6 +139,7 @@ impl Rope {
             reactions: Vec::new(),
             body_dv: Vec::new(),
             body_disp: Vec::new(),
+            body_dx: Vec::new(),
             entry: vec![(u32::MAX, FACE_NONE); n],
         }
     }
@@ -257,6 +270,8 @@ impl Rope {
         self.body_dv.resize(bodies.len(), Vec3::ZERO);
         self.body_disp.clear();
         self.body_disp.resize(bodies.len(), Vec3::ZERO);
+        self.body_dx.clear();
+        self.body_dx.resize(bodies.len(), Vec3::ZERO);
         let h = dt / self.substeps.max(1) as f32;
         for _ in 0..self.substeps {
             self.substep(h, gravity, providers, provider_count, bodies);
@@ -423,6 +438,12 @@ impl Rope {
                     0.0
                 };
                 let lam = lam_geom.min(lam_vel);
+                // **位置口径的补足**（§8.4.9）：被速度钳位压掉的那一份**只补位置、不补速度**
+                //（静载下钳位恒 0 ⇒ 不补就是"只回速度不回位置"的位置漏）。速度侧不动 ⇒
+                // 不会把位置修正反射成速度；钳位生效时（运动/冲击）该项恒 0 ⇒ 既有工况逐位不变。
+                if b.inv_mass > 0.0 && lam_geom > lam {
+                    self.body_dx[j] -= n * (b.inv_mass * (lam_geom - lam));
+                }
                 if lam <= 0.0 {
                     continue;
                 }

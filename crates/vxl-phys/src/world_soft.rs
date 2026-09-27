@@ -103,13 +103,24 @@ impl World {
                 if let Some(dv) = rope.body_dv.get(j) {
                     self.bodies.linvel[p.body as usize] += *dv;
                 }
-            }
-            for r in &rope.reactions {
-                let b = r.body as usize;
-                if b < self.bodies.len() {
-                    self.bodies.torque[b] += r.torque * (1.0 / dt);
+                // **位置口径回填**（`Rope::body_dx`，§8.4.9）：只回速度会让体每 tick 按 `v·dt` 走过的
+                // `g·dt²` 一去不回（实测下沉 ≈ 整漏的 83%）⇒ 把钳位压掉的那一份位置补上。
+                // **速度侧不动**（`body_dx` 是从位置口径算出来的）⇒ 不会把修正反射成速度。
+                if let Some(dx) = rope.body_dx.get(j) {
+                    self.bodies.position[p.body as usize] += *dx;
                 }
             }
+            // **角反作用：本片不施加**（§8.4.9/§8.4.10 实测）。理由不是"力矩算错了"，而是
+            // **接触模型看不见转动**：`body_disp` 只跟踪平移、摩擦的滑移用 `b.linvel` 而非
+            // `linvel + ω×r`、`crossed_face` 用的是**冻结的** `rot` ⇒ 把角动量回填给体以后，
+            // 体转起来的运动会**完全落在模型之外**。实测（1 kg 薄盒压在绳上）：`hit = 1`
+            // （单点接触、力臂 ≈ 0.3 m、`I_zz ≈ 0.031`）⇒ `|ω|` 一 tick 就到 **5~8 rad/s**
+            // ⇒ 接触立刻丢失（`hit = 0`）⇒ 盒子被甩下去（门面 1800 tick y = −2420）。
+            // **自扮引擎侧一直不读 `reactions`**（只吃 `body_dv`）⇒ 它托得住（y@1800 = +0.995），
+            // 这正是两侧差异的最后一块。**要恢复本行**必须先做"转动感知的代理"（见 §8.4.10）：
+            // ⚠️ 恢复时口径要一并修：`integrate_velocities` 每**子步**消费并清零 `force/torque`，
+            // 而这里在所有子步**之后**才注入 ⇒ 实收角冲量 = `τ/substeps`（默认 2 ⇒ **差 2×**）。
+            let _ = &rope.reactions;
         }
         self.rope_proxies = proxies;
     }
