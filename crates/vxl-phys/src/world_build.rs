@@ -41,7 +41,7 @@ impl World {
             provider_bounds: Vec::new(),
             fluids: Vec::new(),
             fluid_boundary: FluidBoundary::default(),
-            ropes: Vec::new(),
+            soft: crate::world_cloth::SoftDomain::default(),
             rope_proxies: Vec::new(),
             timings: PhaseTimings::default(),
         }
