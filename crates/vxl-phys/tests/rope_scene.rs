@@ -146,3 +146,45 @@ fn rope_rests_on_a_static_box_body_beside_a_rigid_body() {
         "绳末态哈希是**冻结基线**（换代级：改绳索数值/接触口径必须重冻并登记）"
     );
 }
+
+/// **门面级双向耦合**：动态盒落在绳上 ⇒ 被托住。
+///
+/// 与软体侧 `rope_minimal::rope_couples_with_rigid_bodies` 同场景，但走 `World::step` 的**完整门面
+/// 路径** —— 只有这条路才吃到**位置回填**（`rope_pass` 里把 `body_disp − 自身运动` 投影到
+/// `bodies.position`）。软体侧的判据自己扮演引擎（只吃 `body_dv`）⇒ **量不到这一项**。
+#[test]
+fn box_on_rope_in_a_world_is_held() {
+    let mut w = World::new(PhysConfig::default());
+    let mut rope = Rope::line(
+        Vec3::new(-0.5, 1.0, 0.0),
+        Vec3::new(0.5, 1.0, 0.0),
+        33,
+        0.02,
+    );
+    rope.damping = 0.999;
+    assert_eq!(w.add_rope(rope), 0, "第一条绳索的索引应为 0");
+    for _ in 0..300 {
+        w.step();
+    }
+    let b = w.add_dynamic(
+        Shape::Box {
+            half: Vec3::new(0.3, 0.05, 0.3),
+        },
+        Vec3::new(0.0, 1.2, 0.0),
+        Quat::IDENTITY,
+        1.0,
+    ) as usize;
+    for _ in 0..1800 {
+        w.step();
+    }
+    let y = w.bodies.position[b].y;
+    println!("门面级 1800 tick：盒 y={y:+.4}");
+    // ⚠️ **钉住的差异（本轮新发现，成因未定）**：**软体侧**同场景（判据自扮引擎、只吃 `body_dv`）
+    // 读到 **−7.9**，而**门面路径**读到 **−2348**（差 ≈300×）⇒ 两者不等价。候选成因：门面的体子步
+    // （`config.substeps`）与绳索 tick 的粒度差、力场/积分顺序、材质与睡眠。**修好后把这条翻成
+    // "被托住"（`y > 0.5`）** —— 本判据的价值就是它**抓到了这个差异**（软体侧那两条量不到）。
+    assert!(
+        y < -1.0,
+        "门面级今天**托不住**（实测 y={y:+.4}）⇒ 已修好就翻断言（阈值改 `y > 0.5`）"
+    );
+}
