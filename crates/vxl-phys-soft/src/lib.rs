@@ -6,9 +6,9 @@
 //!   判据在 `tests/rope_minimal.rs`（悬垂形状 / 二阶收敛 / 真实三角网 / 斜面摩擦）
 //!   与 `crates/vxl-phys/tests/rope_scene.rs`（门面级）；
 //! - [`rigid`]：**粒子↔刚体耦合**（Akinci 式边界处理的最小实现：代理视图 + 穿透查询 + 反作用回填）。
-//! - 后续切片：布料撕裂、自碰撞与 GPU 档。
 #![forbid(unsafe_code)]
 pub mod cloth;
+mod cloth_body;
 pub mod cloth_wind;
 pub mod params;
 pub mod rigid;

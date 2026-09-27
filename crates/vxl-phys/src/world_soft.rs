@@ -70,28 +70,7 @@ impl World {
         let count = self.providers.len() as u32;
         // 刚体代理（每 tick 重建：体在动）。**地形类形状跳过**（`Provider`/`HeightField` 走提供者
         // 通道；`Compound` 本片不支持 ⇒ 直接跳过，别让它悄悄不清碰）。
-        self.rope_proxies.clear();
-        for i in 0..self.bodies.len() {
-            let shape = self.bodies.shape[i];
-            if matches!(
-                shape,
-                Shape::Provider(_) | Shape::HeightField(_) | Shape::Compound { .. }
-            ) {
-                continue;
-            }
-            self.rope_proxies.push(vxl_phys_soft::RigidProxy {
-                body: i as u32,
-                shape,
-                pos: self.bodies.position[i],
-                rot: self.bodies.rot(i),
-                linvel: self.bodies.linvel[i],
-                inv_mass: if self.bodies.is_dynamic(i) {
-                    self.bodies.inv_mass[i]
-                } else {
-                    0.0
-                },
-            });
-        }
+        self.refresh_soft_proxies();
         let proxies = std::mem::take(&mut self.rope_proxies);
         let providers = &self.providers;
         for rope in &mut self.soft.ropes {

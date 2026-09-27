@@ -26,7 +26,7 @@ pub struct ClothSheet {
     pub vel: Vec<Vec3>,
     pub inv_mass: Vec<f32>,
     pub triangles: Vec<[u32; 3]>,
-    prev: Vec<Vec3>,
+    pub(crate) prev: Vec<Vec3>,
     structural: Vec<Edge>,
     shear: Vec<Edge>,
     bending: Vec<Edge>,
@@ -38,7 +38,11 @@ pub struct ClothSheet {
     pub damping: f32,
     pub wind: Option<crate::ClothWind>,
     pub(crate) wind_delta: Vec<Vec3>,
-    contacts: Vec<vxl_phys_core::interop::InteropContact>,
+    /// Proxy-indexed velocity change, reset on each coupled step.
+    pub body_dv: Vec<Vec3>,
+    /// Proxy-indexed position correction, reset on each coupled step.
+    pub body_dx: Vec<Vec3>,
+    pub(crate) contacts: Vec<vxl_phys_core::interop::InteropContact>,
 }
 
 impl ClothSheet {
@@ -97,6 +101,8 @@ impl ClothSheet {
             damping: 1.0,
             wind: None,
             wind_delta: Vec::new(),
+            body_dv: Vec::new(),
+            body_dx: Vec::new(),
             contacts: Vec::new(),
         }
     }
@@ -127,16 +133,15 @@ impl ClothSheet {
             .fold(0.0, f32::max)
     }
 
-    /// Step against static providers. Provider IDs are contiguous from zero, as in `Rope::step`.
-    pub fn step(&mut self, dt: f32, gravity: Vec3, providers: &dyn ProviderColliders, count: u32) {
-        assert!(dt.is_finite() && dt > 0.0);
-        let h = dt / self.substeps.max(1) as f32;
-        for _ in 0..self.substeps.max(1) {
-            self.substep(h, gravity, providers, count);
-        }
-    }
-
-    fn substep(&mut self, h: f32, gravity: Vec3, providers: &dyn ProviderColliders, count: u32) {
+    /// One cloth substep, optionally coupled to rigid proxies.
+    pub(crate) fn substep(
+        &mut self,
+        h: f32,
+        gravity: Vec3,
+        providers: &dyn ProviderColliders,
+        count: u32,
+        bodies: &[crate::RigidProxy],
+    ) {
         self.apply_wind(h);
         for i in 0..self.pos.len() {
             self.prev[i] = self.pos[i];
@@ -179,6 +184,9 @@ impl ClothSheet {
             );
         }
         self.project_contacts(providers, count);
+        if !bodies.is_empty() {
+            self.project_body_contacts(bodies, h);
+        }
         for i in 0..self.pos.len() {
             self.vel[i] = if self.inv_mass[i] == 0.0 {
                 Vec3::ZERO
@@ -205,31 +213,6 @@ impl ClothSheet {
             let shift = delta * (dl / len);
             pos[e.a] -= shift * masses[e.a];
             pos[e.b] += shift * masses[e.b];
-        }
-    }
-
-    fn project_contacts(&mut self, providers: &dyn ProviderColliders, count: u32) {
-        for i in 0..self.pos.len() {
-            if self.inv_mass[i] == 0.0 {
-                continue;
-            }
-            for id in 0..count {
-                self.contacts.clear();
-                if !providers.contacts_sphere(
-                    id,
-                    self.pos[i],
-                    self.radius,
-                    self.skin,
-                    &mut self.contacts,
-                ) {
-                    continue;
-                }
-                for hit in &self.contacts {
-                    if hit.depth > 0.0 {
-                        self.pos[i] += hit.normal * hit.depth;
-                    }
-                }
-            }
         }
     }
 }
