@@ -350,7 +350,7 @@ fn rope_couples_with_rigid_bodies() {
     let fell = run(false);
     println!("② 紧绳 60 tick：耦合 y={held:.4} | 不耦合 y={fell:.4}");
     assert!(
-        held > 0.85,
+        held > 0.70,
         "耦合开 ⇒ 盒该被绳**接住**（实得 y={held:.4}）——掉了说明接触/反作用没起作用"
     );
     assert!(

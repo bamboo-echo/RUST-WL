@@ -11,7 +11,29 @@ const CENTER: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 const R: f32 = 0.02;
 
 fn call(prev: Vec3, now: Vec3) -> Option<(Vec3, f32, Vec3, u8)> {
-    crossed_face(Quat::IDENTITY, HALF, CENTER, prev, now, R)
+    // 单元情形里盒不动 ⇒ 两个位姿相同
+    crossed_face(Quat::IDENTITY, HALF, CENTER, CENTER, prev, now, R)
+}
+
+/// ⑥ **动的是盒子**（粒子不动）—— 真实场景的机制：盒从 1.02 降到 1.00，粒子静止在 0.945
+/// ⇒ 必须判成"穿过底面"。（这**正是**整场"缓存命中 = 0、盒子穿过绳线"的根因：只给一个位姿时，
+/// 穿越只能来自粒子的位移，而这里动的是盒。）
+#[test]
+fn moving_box_onto_still_particle() {
+    let p = Vec3::new(0.0, 0.945, 0.0);
+    let r = crossed_face(
+        Quat::IDENTITY,
+        HALF,
+        Vec3::new(0.0, 1.02, 0.0), // 上一子步：盒底 0.97 ⇒ 粒子在带外 0.025 ≥ 0.02
+        Vec3::new(0.0, 1.00, 0.0), // 当前：盒底 0.95 ⇒ 粒子进带内 0.005 < 0.02
+        p,
+        p,
+        R,
+    );
+    let (n, depth, _, face) = r.expect("盒在动也该判成穿过底面（这一条是整场'零接触'的根因）");
+    assert_eq!(face, 2, "面号应为 y−（2），实得 {face}");
+    assert!(n.y < -0.99, "法线应指 −y，实得 {n:?}");
+    assert!((depth - 0.015).abs() < 1e-4, "深度应为 0.015，实得 {depth}");
 }
 
 /// ① 从**下方**进底面（`y−` 面）：`face` 应为 2、法线 `(0,−1,0)`、`depth = radius − d_b`。

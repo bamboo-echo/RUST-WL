@@ -37,19 +37,25 @@ pub struct RigidReaction {
 /// `(该面的世界外法线, 沿该法线的穿透量, 面上交点（世界）, 面号)`；没有"由外入内"的穿越 ⇒ `None`。
 /// **面号编码**：`k*2 + (s>0)`（`k` = 0/1/2 → x/y/z；`s` = ±1）⇒ 0=x−、1=x+、2=y−、3=y+、4=z−、5=z+。
 ///
+/// **⚠️ 必须给两个位姿**（`pos_prev` = 上一子步的体位姿、`pos_now` = 当前）：穿越可能来自**体在动**
+/// 而粒子不动（盒落在绳上正是这种）—— 只用一个位姿算 `prev`/`now` ⇒ **永远检测不到穿越**
+/// （实测：整场"缓存命中 = 0"、盒子直接穿过绳线）。
+///
 /// **判据阈值取 `radius`（不是 0）**：接触是**球面**相碰 —— 球心停在面外 `radius` 处就已接触；
-/// 只按"球心过面"写 ⇒ **永不成穿越**（实测：只做穿越 ⇒ 静止接触 = 零接触、盒子自由落体 −3.7868）。
-/// 即"由 `radius` 外侧进入带内"：`d_a ≥ radius && d_b < radius`、`depth = radius − d_b`。
+/// 只按"球心过面"写 ⇒ **永不成穿越**。即"由 `radius` 外侧进入带内"：`d_a ≥ radius && d_b < radius`、
+/// `depth = radius − d_b`。
 ///
 /// **调用方必须缓存这个面号**：穿越只在一子步成立 ⇒ 接触是**一段状态**（见 `Rope::entry`）。
 /// **为什么不用"最近面"**：体相对绳线**下沉**时最近面会在底面↔侧面↔顶面之间翻转 ⇒ 推力方向突变
 /// ⇒ 一次踢击把体送走（§8.4.1/§8.4.3 实测）；而"它穿过的那个面"只要还在从下面顶就一直是底面 ✓。
+#[allow(clippy::too_many_arguments)] // 形状 + 两个位姿 + 两个位置 + 半径
 pub fn crossed_face(
     rot: Quat,
     half: Vec3,
-    pos: Vec3,
-    prev: Vec3,
-    now: Vec3,
+    pos_prev: Vec3,
+    pos_now: Vec3,
+    p_prev: Vec3,
+    p_now: Vec3,
     radius: f32,
 ) -> Option<(Vec3, f32, Vec3, u8)> {
     fn ax(v: Vec3, k: usize) -> f32 {
@@ -60,8 +66,8 @@ pub fn crossed_face(
         }
     }
     let m = Mat3::from_quat(rot);
-    let a = m.transpose_mul_vec3(prev - pos);
-    let b = m.transpose_mul_vec3(now - pos);
+    let a = m.transpose_mul_vec3(p_prev - pos_prev);
+    let b = m.transpose_mul_vec3(p_now - pos_now);
     let mut best: Option<(f32, usize, f32, f32)> = None; // (深度, 轴, 符号, 带边交点参数)
     for k in 0..3 {
         for s in [-1.0f32, 1.0] {
@@ -96,7 +102,12 @@ pub fn crossed_face(
         1 => Vec3::new(pl.x, s * half.y, pl.z),
         _ => Vec3::new(pl.x, pl.y, s * half.z),
     };
-    Some((m.mul_vec3(n_local), depth, pos + m.mul_vec3(q_local), face))
+    Some((
+        m.mul_vec3(n_local),
+        depth,
+        pos_now + m.mul_vec3(q_local),
+        face,
+    ))
 }
 
 /// 球（心 `p`、半径 `radius`）对 `shape`（位姿 `pos`/`rot`）的**穿透**：

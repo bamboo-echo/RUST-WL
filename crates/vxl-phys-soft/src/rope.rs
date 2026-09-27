@@ -16,8 +16,11 @@
 //! **本片已有**：最小闭环、**摩擦（切向库仑锥）**、**粒子↔刚体耦合（Akinci 式最小实现）**、
 //! 门面接线（`World::add_rope`）；**待落地**：体积/弯曲约束、自碰撞、GPU 档。
 //! 判据在 `tests/rope_minimal.rs` 与 `crates/vxl-phys/tests/rope_scene.rs`。
-use crate::rigid::{shape_penetration, RigidProxy, RigidReaction};
-use vxl_phys_core::{interop::ProviderColliders, Vec3};
+use crate::rigid::{crossed_face, shape_penetration, RigidProxy, RigidReaction};
+use vxl_phys_core::{interop::ProviderColliders, Mat3, Shape, Vec3};
+
+/// 入口面缓存里的"无"（见 `Rope::entry`）。
+const FACE_NONE: u8 = 255;
 
 /// 绳索：等距粒子链 + XPBD 距离约束 + 点-形状接触。
 pub struct Rope {
@@ -68,6 +71,12 @@ pub struct Rope {
     /// 子步内**虚拟位移**（同上序）：体自己走的 + 我们推开的，**增量累加** —— 见 `project_body_contacts`
     /// 里那条"不能乘整段时间"的注（那是所有"参数怎么调都逃逸"的真凶）。
     body_disp: Vec<Vec3>,
+    /// **入口面缓存**（与粒子同序）：`(体号, 面号)` —— 该粒子**从哪张面**进的盒（§8.4.5.1）。
+    /// 为什么必须缓存：穿越判据只在**进来的那一子步**成立（实测：只做穿越 ⇒ 静止接触 = 零接触、
+    /// 盒子自由落体 −3.7868）⇒ 接触是**一段状态**：只要还在该面内侧带内就继续按它推，出去了或
+    /// 横向滑出面范围就释放。只用 `(粒子, 体, 位姿历史)` 决定 ⇒ 逐位可复现。
+    /// `体号 == u32::MAX` = 无缓存。
+    entry: Vec<(u32, u8)>,
 }
 
 impl Rope {
@@ -109,12 +118,106 @@ impl Rope {
             reactions: Vec::new(),
             body_dv: Vec::new(),
             body_disp: Vec::new(),
+            entry: vec![(u32::MAX, FACE_NONE); n],
         }
     }
 
     /// 粒子数。
     pub fn nodes(&self) -> usize {
         self.pos.len()
+    }
+
+    /// **入口面缓存**（只读，判据/调试用）：`(体号, 面号)`；`体号 == u32::MAX` = 该粒子当前无缓存。
+    pub fn entry_faces(&self) -> &[(u32, u8)] {
+        &self.entry
+    }
+
+    /// **Box 的接触判定**（"入口面" + 缓存；从 `project_body_contacts` 抽出，god 门最长函数约束）。
+    ///
+    /// 为什么不用"当前最近面"：体相对绳线**下沉**时最近面会在底面↔侧面↔顶面之间**翻转** ⇒ 推力
+    /// 方向突变 ⇒ 踢击把体送走（柔度/入口法线/质量比/虚拟位姿共 4 次否定都栽在这上面）；而"它**穿过**
+    /// 的那个面"只要还在从下面顶就一直是底面 ⇒ 不翻转。**穿越判据只在一子步成立** ⇒ 接触按
+    /// "一段状态"维护：记住面号，直到出去（或横向滑出面范围）。非 Box 走点式（无"面"歧义）。
+    fn box_hit(
+        &mut self,
+        i: usize,
+        j: usize,
+        b: &RigidProxy,
+        vpos: Vec3,
+        h: f32,
+        radius: f32,
+    ) -> Option<(Vec3, f32, Vec3)> {
+        let comp = |v: Vec3, k: usize| match k {
+            0 => v.x,
+            1 => v.y,
+            _ => v.z,
+        };
+        if let Shape::Box { half } = b.shape {
+            let m = Mat3::from_quat(b.rot);
+            let local = m.transpose_mul_vec3(self.pos[i] - vpos);
+            let mut face = FACE_NONE;
+            if self.entry[i].0 == b.body && self.entry[i].1 != FACE_NONE {
+                let f = self.entry[i].1;
+                let (k, s) = (
+                    (f / 2) as usize,
+                    if f.is_multiple_of(2) { -1.0 } else { 1.0 },
+                );
+                let (j1, j2) = ((k + 1) % 3, (k + 2) % 3);
+                let in_face = comp(local, j1).abs() <= comp(half, j1) + radius
+                    && comp(local, j2).abs() <= comp(half, j2) + radius;
+                // **滞回**：进入要求 `out < radius`（穿越判据同口径），**保持**放宽到 `1.5·radius`
+                // —— 静止接触恰好坐在 `out = radius` 的刀锋上，不放宽会反复释放/重建
+                // （实测：命中只有 2~3 颗、盒子缓慢下沉）。
+                if in_face && s * comp(local, k) - comp(half, k) < radius * 1.5 {
+                    face = f; // 仍在该面内侧带内 ⇒ 继续用它
+                } else {
+                    self.entry[i] = (u32::MAX, FACE_NONE); // 释放
+                }
+            }
+            if face == FACE_NONE {
+                // 无缓存 ⇒ 跑一次穿越测试；命中就**记下这张面**。
+                // **两个位姿都要给**：动的是盒子（粒子几乎不动）⇒ 只用一个位姿永远测不到穿越
+                // （实测：整场"缓存命中 = 0"、盒子直接穿过绳线）。
+                let vpos_prev = vpos - (b.linvel + self.body_dv[j]) * h;
+                crossed_face(
+                    b.rot,
+                    half,
+                    vpos_prev,
+                    vpos,
+                    self.prev[i],
+                    self.pos[i],
+                    radius,
+                )
+                .map(|(n, depth, q, f)| {
+                    self.entry[i] = (b.body, f);
+                    (n, depth, q)
+                })
+            } else {
+                let (k, s) = (
+                    (face / 2) as usize,
+                    if face.is_multiple_of(2) { -1.0 } else { 1.0 },
+                );
+                let out = s * comp(local, k) - comp(half, k);
+                let n_local = match k {
+                    0 => Vec3::new(s, 0.0, 0.0),
+                    1 => Vec3::new(0.0, s, 0.0),
+                    _ => Vec3::new(0.0, 0.0, s),
+                };
+                // 接触点：球心投影到该面平面上（第 k 轴钉到 ±half，另两轴取粒子值）。
+                let q_local = match k {
+                    0 => Vec3::new(s * half.x, local.y, local.z),
+                    1 => Vec3::new(local.x, s * half.y, local.z),
+                    _ => Vec3::new(local.x, local.y, s * half.z),
+                };
+                Some((
+                    m.mul_vec3(n_local),
+                    radius - out,
+                    vpos + m.mul_vec3(q_local),
+                ))
+            }
+        } else {
+            shape_penetration(&b.shape, vpos, b.rot, self.pos[i], radius)
+        }
     }
 
     /// 钉住 / 松开第 `i` 个粒子。
@@ -279,9 +382,9 @@ impl Rope {
                 if self.inv_mass[i] == 0.0 {
                     continue;
                 }
-                let Some((n, depth, q)) =
-                    shape_penetration(&b.shape, vpos, b.rot, self.pos[i], radius)
-                else {
+                // **接触面 = "入口面"（必须缓存）**（§8.4.5）：判定抽到 `box_hit`
+                // —— 本函数受 god 门"最长函数 ≤ 120 行"约束，那段不留在原地。
+                let Some((n, depth, q)) = self.box_hit(i, j, b, vpos, h, radius) else {
                     continue;
                 };
                 if depth <= 0.0 {
